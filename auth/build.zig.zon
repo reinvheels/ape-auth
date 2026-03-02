@@ -1,0 +1,10 @@
+.{
+    .name = .ape_auth,
+    .version = "0.1.0",
+    .fingerprint = 0xaeeb06d1afc935b4,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

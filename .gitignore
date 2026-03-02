@@ -1,0 +1,7 @@
+node_modules/
+Pulumi.*.yaml
+!Pulumi.sample.yaml
+bin/
+zig-out/
+zig-cache/
+.zig-cache/

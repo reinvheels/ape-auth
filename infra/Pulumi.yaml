@@ -1,0 +1,3 @@
+name: ape-auth-infra
+runtime: nodejs
+description: Pulumi project for Ape Auth identity provider on AWS
