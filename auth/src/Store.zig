@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 
 const Store = @This();
 
-pub const uuid_len = 32; // 16 bytes hex-encoded
+pub const uuid_len = 36; // 16 bytes hex-encoded with dashes (8-4-4-4-12)
 pub const token_len = 64; // 32 bytes hex-encoded
 pub const key_len = 64; // 32 bytes hex-encoded
 pub const sig_len = 128; // 64 bytes hex-encoded
@@ -43,6 +43,7 @@ pub const Challenge = struct {
 
 mutex: std.Thread.Mutex = .{},
 allocator: Allocator,
+base_dir: ?[]const u8 = null,
 accounts: std.StringHashMapUnmanaged(Account) = .{},
 devices: std.StringHashMapUnmanaged(Device) = .{},
 // devices indexed by hex-encoded public key -> device id
@@ -110,7 +111,19 @@ pub fn unlock(self: *Store) void {
 pub fn generateUuid() [uuid_len]u8 {
     var bytes: [16]u8 = undefined;
     std.crypto.random.bytes(&bytes);
-    return hexEncode(16, &bytes);
+    const hex = hexEncode(16, &bytes);
+    // Format as xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    var out: [uuid_len]u8 = undefined;
+    @memcpy(out[0..8], hex[0..8]);
+    out[8] = '-';
+    @memcpy(out[9..13], hex[8..12]);
+    out[13] = '-';
+    @memcpy(out[14..18], hex[12..16]);
+    out[18] = '-';
+    @memcpy(out[19..23], hex[16..20]);
+    out[23] = '-';
+    @memcpy(out[24..36], hex[20..32]);
+    return out;
 }
 
 pub fn generateToken() [token_len]u8 {
@@ -270,9 +283,16 @@ pub fn removeChallenge(self: *Store, nonce_hex: []const u8) void {
 
 // --- Tests ---
 
-test "generateUuid returns valid hex" {
+test "generateUuid returns valid dashed hex" {
     const uuid = generateUuid();
-    for (uuid) |c| {
+    // Verify dash positions: 8-4-4-4-12
+    try std.testing.expectEqual(@as(u8, '-'), uuid[8]);
+    try std.testing.expectEqual(@as(u8, '-'), uuid[13]);
+    try std.testing.expectEqual(@as(u8, '-'), uuid[18]);
+    try std.testing.expectEqual(@as(u8, '-'), uuid[23]);
+    // Verify hex chars everywhere else
+    for (uuid, 0..) |c, i| {
+        if (i == 8 or i == 13 or i == 18 or i == 23) continue;
         try std.testing.expect((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f'));
     }
 }

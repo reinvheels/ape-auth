@@ -1,5 +1,6 @@
 const std = @import("std");
 const Store = @import("Store.zig");
+const persist = @import("persist.zig");
 const Ed25519 = std.crypto.sign.Ed25519;
 const Allocator = std.mem.Allocator;
 
@@ -77,6 +78,8 @@ pub fn register(store: *Store, public_key_hex: []const u8, device_name: []const 
 
     const tokens = try createTokenPair(store, &account_id, &device_id, now);
 
+    persistAccount(store, &account_id);
+
     return .{
         .account_id = account_id,
         .device_id = device_id,
@@ -146,6 +149,8 @@ pub fn login(store: *Store, public_key_hex: []const u8, challenge_hex: []const u
 
     const tokens = try createTokenPair(store, &account_id, &device_id, now);
 
+    persistAccount(store, &account_id);
+
     return .{
         .account_id = account_id,
         .tokens = tokens,
@@ -172,7 +177,11 @@ pub fn refreshTokens(store: *Store, refresh_token_hex: []const u8) (AuthError ||
     // Revoke old refresh token
     store.removeRefreshToken(refresh_token_hex);
 
-    return try createTokenPair(store, &account_id, &device_id, now);
+    const tokens = try createTokenPair(store, &account_id, &device_id, now);
+
+    persistAccount(store, &account_id);
+
+    return tokens;
 }
 
 /// Validate an access token and return the associated account_id. Caller must hold store lock.
@@ -213,6 +222,8 @@ pub fn linkDevice(store: *Store, account_id: *const [Store.uuid_len]u8, public_k
         .created_at = Store.timestamp(),
     });
 
+    persistAccount(store, account_id);
+
     return device_id;
 }
 
@@ -234,6 +245,8 @@ pub fn unlinkDevice(store: *Store, account_id: *const [Store.uuid_len]u8, device
     if (device_ids.len <= 1) return AuthError.CannotRemoveLastDevice;
 
     store.removeDevice(device_id_hex[0..Store.uuid_len]) catch {};
+
+    persistAccount(store, account_id);
 }
 
 /// Get account info including linked devices. Caller must hold lock if needed.
@@ -277,6 +290,13 @@ pub fn getAccountInfo(allocator: Allocator, store: *Store, account_id: *const [S
 }
 
 // --- Internal ---
+
+fn persistAccount(store: *Store, account_id: *const [Store.uuid_len]u8) void {
+    const base_dir = store.base_dir orelse return;
+    persist.saveAccount(store.allocator, store, base_dir, account_id) catch |err| {
+        std.log.err("persist failed for account {s}: {}", .{ account_id, err });
+    };
+}
 
 fn createTokenPair(store: *Store, account_id: *const [Store.uuid_len]u8, device_id: *const [Store.uuid_len]u8, now: i64) Allocator.Error!TokenPair {
     const access = Store.generateToken();

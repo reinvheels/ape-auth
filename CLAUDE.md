@@ -8,14 +8,15 @@ Minimal identity provider built in Zig. Device-based authentication — no passw
 ┌──────────────┐       ┌──────────────────┐       ┌──────────────┐
 │  Client      │──────►│  Ape Auth (Zig)  │──────►│  Storage     │
 │  (Browser /  │ HTTP  │  OAuth endpoints │       │  (Memory +   │
-│   Mobile)    │◄──────│  Device auth     │◄──────│   FS backup) │
+│   Mobile)    │◄──────│  Device auth     │◄──────│   FS per-    │
+│              │       │                  │       │   account)   │
 └──────────────┘       └──────────────────┘       └──────────────┘
 ```
 
 ### How It Works
 
 - **In-memory data store** — all auth data lives in memory for fast access
-- **Periodic filesystem backup** — state is written to disk on a configurable interval for persistence and rehydration on restart
+- **File-per-account persistence** — each account is persisted to its own JSON file immediately on mutation (register, login, token refresh, device link/unlink). UUID-based directory sharding: `a1b2c3d4/e5f6/7890/abcd/ef1234567890.json`
 - **Runs in always-warm Lambda** — designed for Lambda + EFS (or similar), but can run standalone
 - **Device-based identity** — each account is created from a device keypair; no passwords or external identity providers
 - **Multi-device recovery** — users link additional devices to their account; any linked device can restore access
@@ -70,8 +71,10 @@ Key endpoints:
 
 Data storage:
 - In-memory HashMap for active sessions and accounts
-- Periodic JSON/binary dump to filesystem (configurable interval)
-- On startup, rehydrate from latest backup file
+- File-per-account persistence — each account written to its own JSON file on every mutation (atomic tmp+rename)
+- UUID directory sharding: dashes replaced with `/` → 4-level directory tree
+- On startup, recursively loads all `.json` files from data directory
+- Challenges are ephemeral (60s TTL) — not persisted
 
 ### Infrastructure (Pulumi / TypeScript)
 
@@ -90,12 +93,17 @@ puc push prod     # push config to SSM
 #### Target deployment
 
 - AWS Lambda (always-warm / provisioned concurrency) with function URL or API Gateway
-- EFS mount for persistent backup storage
+- EFS mount for persistent per-account storage
 - Zig binary cross-compiled for `aarch64-linux` (Lambda ARM runtime)
 
 ### Files
 
-- `auth/` — Zig source for the identity provider
+- `auth/src/main.zig` — entry point, starts TCP server, loads persisted data on startup
+- `auth/src/Store.zig` — in-memory data store (accounts, devices, sessions, refresh tokens, challenges), UUID generation (36-char dashed format)
+- `auth/src/auth.zig` — auth logic (register, login, challenge, token refresh, device link/unlink), calls persist after mutations
+- `auth/src/Server.zig` — HTTP request routing and response handling
+- `auth/src/json.zig` — JSON request parsing, response building, per-account serialization/deserialization
+- `auth/src/persist.zig` — file-per-account persistence (accountPath, saveAccount, loadAll)
 - `infra/index.ts` — main infrastructure (Lambda, EFS, IAM, API Gateway)
 - `infra/Pulumi.yaml` — project config
 - `infra/Pulumi.prod.yaml` — stack config (gitignored, managed via `puc`)

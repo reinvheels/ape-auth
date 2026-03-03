@@ -113,21 +113,21 @@ fn statusString(status: std.http.Status) []const u8 {
     };
 }
 
-// --- Backup Serialization ---
+// --- Per-Account Serialization ---
 
-pub const BackupData = struct {
-    accounts: []const BackupAccount,
-    devices: []const BackupDevice,
-    sessions: []const BackupSession,
-    refresh_tokens: []const BackupRefreshToken,
+pub const AccountData = struct {
+    account: AccountJson,
+    devices: []const DeviceJson,
+    sessions: []const SessionJson,
+    refresh_tokens: []const RefreshTokenJson,
 };
 
-pub const BackupAccount = struct {
+pub const AccountJson = struct {
     id: []const u8,
     created_at: i64,
 };
 
-pub const BackupDevice = struct {
+pub const DeviceJson = struct {
     id: []const u8,
     account_id: []const u8,
     public_key: []const u8,
@@ -135,28 +135,29 @@ pub const BackupDevice = struct {
     created_at: i64,
 };
 
-pub const BackupSession = struct {
+pub const SessionJson = struct {
     token: []const u8,
     account_id: []const u8,
     device_id: []const u8,
     expires_at: i64,
 };
 
-pub const BackupRefreshToken = struct {
+pub const RefreshTokenJson = struct {
     token: []const u8,
     account_id: []const u8,
     device_id: []const u8,
     expires_at: i64,
 };
 
-pub fn serializeStore(allocator: Allocator, store: *Store) ![]const u8 {
-    var accounts_list = std.ArrayListUnmanaged(BackupAccount){};
-    defer accounts_list.deinit(allocator);
-    var devices_list = std.ArrayListUnmanaged(BackupDevice){};
+/// Serialize a single account and all its associated data. Caller must hold store lock.
+pub fn serializeAccount(allocator: Allocator, store: *Store, account_id: *const [Store.uuid_len]u8) ![]const u8 {
+    const account = store.accounts.get(account_id) orelse return error.AccountNotFound;
+
+    var devices_list = std.ArrayListUnmanaged(DeviceJson){};
     defer devices_list.deinit(allocator);
-    var sessions_list = std.ArrayListUnmanaged(BackupSession){};
+    var sessions_list = std.ArrayListUnmanaged(SessionJson){};
     defer sessions_list.deinit(allocator);
-    var rt_list = std.ArrayListUnmanaged(BackupRefreshToken){};
+    var rt_list = std.ArrayListUnmanaged(RefreshTokenJson){};
     defer rt_list.deinit(allocator);
 
     // Temp storage for hex-encoded public keys
@@ -166,80 +167,77 @@ pub fn serializeStore(allocator: Allocator, store: *Store) ![]const u8 {
         pk_strs.deinit(allocator);
     }
 
-    // Collect accounts
-    {
-        var it = store.accounts.valueIterator();
-        while (it.next()) |acc| {
-            try accounts_list.append(allocator, .{ .id = &acc.id, .created_at = acc.created_at });
+    // Collect devices for this account
+    if (store.getDevicesByAccount(account_id)) |device_ids| {
+        for (device_ids) |did| {
+            if (store.devices.get(&did)) |dev| {
+                const pk_hex = Store.hexEncode(32, &dev.public_key);
+                const pk_str = try allocator.dupe(u8, &pk_hex);
+                try pk_strs.append(allocator, pk_str);
+                try devices_list.append(allocator, .{
+                    .id = &dev.id,
+                    .account_id = &dev.account_id,
+                    .public_key = pk_str,
+                    .name = dev.name,
+                    .created_at = dev.created_at,
+                });
+            }
         }
     }
 
-    // Collect devices
-    {
-        var it = store.devices.valueIterator();
-        while (it.next()) |dev| {
-            const pk_hex = Store.hexEncode(32, &dev.public_key);
-            const pk_str = try allocator.dupe(u8, &pk_hex);
-            try pk_strs.append(allocator, pk_str);
-            try devices_list.append(allocator, .{
-                .id = &dev.id,
-                .account_id = &dev.account_id,
-                .public_key = pk_str,
-                .name = dev.name,
-                .created_at = dev.created_at,
-            });
-        }
-    }
-
-    // Collect sessions
+    // Collect sessions for this account
     {
         var it = store.sessions.valueIterator();
         while (it.next()) |sess| {
-            try sessions_list.append(allocator, .{
-                .token = &sess.token,
-                .account_id = &sess.account_id,
-                .device_id = &sess.device_id,
-                .expires_at = sess.expires_at,
-            });
+            if (std.mem.eql(u8, &sess.account_id, account_id)) {
+                try sessions_list.append(allocator, .{
+                    .token = &sess.token,
+                    .account_id = &sess.account_id,
+                    .device_id = &sess.device_id,
+                    .expires_at = sess.expires_at,
+                });
+            }
         }
     }
 
-    // Collect refresh tokens
+    // Collect refresh tokens for this account
     {
         var it = store.refresh_tokens.valueIterator();
         while (it.next()) |rt| {
-            try rt_list.append(allocator, .{
-                .token = &rt.token,
-                .account_id = &rt.account_id,
-                .device_id = &rt.device_id,
-                .expires_at = rt.expires_at,
-            });
+            if (std.mem.eql(u8, &rt.account_id, account_id)) {
+                try rt_list.append(allocator, .{
+                    .token = &rt.token,
+                    .account_id = &rt.account_id,
+                    .device_id = &rt.device_id,
+                    .expires_at = rt.expires_at,
+                });
+            }
         }
     }
 
-    const backup_data = BackupData{
-        .accounts = accounts_list.items,
+    const account_data = AccountData{
+        .account = .{ .id = &account.id, .created_at = account.created_at },
         .devices = devices_list.items,
         .sessions = sessions_list.items,
         .refresh_tokens = rt_list.items,
     };
 
-    return try std.json.Stringify.valueAlloc(allocator, backup_data, .{});
+    return try std.json.Stringify.valueAlloc(allocator, account_data, .{});
 }
 
-pub fn deserializeStore(allocator: Allocator, store: *Store, data: []const u8) !void {
-    const parsed = try std.json.parseFromSlice(BackupData, allocator, data, .{});
+/// Deserialize a single account file and load it into the store. Caller must hold store lock.
+pub fn deserializeAccount(allocator: Allocator, store: *Store, data: []const u8) !void {
+    const parsed = try std.json.parseFromSlice(AccountData, allocator, data, .{});
     defer parsed.deinit();
 
-    for (parsed.value.accounts) |acc| {
-        if (acc.id.len != Store.uuid_len) continue;
-        var account = Store.Account{
-            .id = undefined,
-            .created_at = acc.created_at,
-        };
-        @memcpy(&account.id, acc.id[0..Store.uuid_len]);
-        try store.putAccount(account);
-    }
+    const acc = parsed.value.account;
+    if (acc.id.len != Store.uuid_len) return error.InvalidData;
+    var account = Store.Account{
+        .id = undefined,
+        .created_at = acc.created_at,
+    };
+    @memcpy(&account.id, acc.id[0..Store.uuid_len]);
+    try store.putAccount(account);
 
     for (parsed.value.devices) |dev| {
         if (dev.id.len != Store.uuid_len) continue;
@@ -311,7 +309,7 @@ test "parse register request" {
     try std.testing.expectEqualStrings("test", req.device_name);
 }
 
-test "serialize and deserialize store roundtrip" {
+test "serialize and deserialize account roundtrip" {
     var store = Store.init(std.testing.allocator);
     defer store.deinit();
 
@@ -330,13 +328,13 @@ test "serialize and deserialize store roundtrip" {
         .created_at = Store.timestamp(),
     });
 
-    const json_data = try serializeStore(std.testing.allocator, &store);
+    const json_data = try serializeAccount(std.testing.allocator, &store, &account_id);
     defer std.testing.allocator.free(json_data);
 
     var store2 = Store.init(std.testing.allocator);
     defer store2.deinit();
 
-    try deserializeStore(std.testing.allocator, &store2, json_data);
+    try deserializeAccount(std.testing.allocator, &store2, json_data);
 
     try std.testing.expect(store2.accounts.get(&account_id) != null);
     try std.testing.expect(store2.devices.get(&device_id) != null);

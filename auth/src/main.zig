@@ -2,10 +2,10 @@ const std = @import("std");
 const net = std.net;
 const Store = @import("Store.zig");
 const Server = @import("Server.zig");
-const backup = @import("backup.zig");
+const persist = @import("persist.zig");
 
 const port: u16 = 8080;
-const backup_dir = "/tmp/ape-auth";
+const data_dir = "/tmp/ape-auth";
 
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
@@ -15,20 +15,18 @@ pub fn main() !void {
     // Initialize store
     var store = Store.init(allocator);
     defer store.deinit();
+    store.base_dir = data_dir;
 
-    // Ensure backup directory exists
-    std.fs.makeDirAbsolute(backup_dir) catch |err| switch (err) {
+    // Ensure data directory exists
+    std.fs.makeDirAbsolute(data_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    // Rehydrate from backup
-    backup.rehydrate(allocator, &store, backup_dir) catch |err| {
-        std.log.err("rehydration failed: {}, starting fresh", .{err});
+    // Load persisted accounts
+    persist.loadAll(allocator, &store, data_dir) catch |err| {
+        std.log.err("failed to load persisted data: {}, starting fresh", .{err});
     };
-
-    // Start backup thread
-    _ = try backup.startBackupThread(allocator, &store, backup_dir);
 
     // Start TCP server
     var server = Server.init(allocator, &store);
@@ -55,7 +53,7 @@ comptime {
     _ = Server;
     _ = @import("auth.zig");
     _ = @import("json.zig");
-    _ = @import("backup.zig");
+    _ = @import("persist.zig");
 }
 
 test "smoke" {
