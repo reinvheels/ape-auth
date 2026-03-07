@@ -28,10 +28,11 @@ pub const AuthError = error{
 pub const Config = struct {
     allocator: Allocator,
     base_dir: []const u8,
+    server_secret: *const [32]u8,
 };
 
 pub const TokenPair = struct {
-    access_token: [crypto.compound_token_len]u8,
+    access_token: [crypto.access_token_len]u8,
     refresh_token: [crypto.compound_token_len]u8,
     expires_at: i64,
 };
@@ -80,11 +81,8 @@ pub fn register(config: Config, public_key_hex: []const u8, device_name: []const
     };
     errdefer persist.removeKeyIndex(config.allocator, config.base_dir, public_key_hex) catch {};
 
-    const access_compound = crypto.makeCompoundToken(&account_id);
+    const access_token = crypto.makeAccessToken(config.server_secret, &account_id, now + access_token_ttl);
     const refresh_compound = crypto.makeCompoundToken(&account_id);
-
-    // Extract the token parts (64-char random portion) for storage
-    const access_parts = crypto.parseCompoundToken(&access_compound).?;
     const refresh_parts = crypto.parseCompoundToken(&refresh_compound).?;
 
     const devices = [_]schema.Device{.{
@@ -92,11 +90,6 @@ pub fn register(config: Config, public_key_hex: []const u8, device_name: []const
         .public_key = public_key_hex,
         .name = device_name,
         .created_at = now,
-    }};
-    const access_tokens = [_]schema.Token{.{
-        .token = &access_parts.token_part,
-        .device_id = &device_id,
-        .expires_at = now + access_token_ttl,
     }};
     const refresh_tokens = [_]schema.Token{.{
         .token = &refresh_parts.token_part,
@@ -107,7 +100,6 @@ pub fn register(config: Config, public_key_hex: []const u8, device_name: []const
     const data = schema.AccountData{
         .account = .{ .id = &account_id, .created_at = now },
         .devices = &devices,
-        .access_tokens = &access_tokens,
         .refresh_tokens = &refresh_tokens,
     };
 
@@ -120,7 +112,7 @@ pub fn register(config: Config, public_key_hex: []const u8, device_name: []const
         .account_id = account_id,
         .device_id = device_id,
         .tokens = .{
-            .access_token = access_compound,
+            .access_token = access_token,
             .refresh_token = refresh_compound,
             .expires_at = now + access_token_ttl,
         },
@@ -174,7 +166,6 @@ pub fn createChallenge(config: Config, public_key_hex: []const u8) !ChallengeRes
     const new_data = schema.AccountData{
         .account = locked.data.value.account,
         .devices = locked.data.value.devices,
-        .access_tokens = locked.data.value.access_tokens,
         .refresh_tokens = locked.data.value.refresh_tokens,
         .challenges = challenges.items,
     };
@@ -234,38 +225,23 @@ pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const 
     }
 
     const device_id = found_device_id.?;
-    const access_compound = crypto.makeCompoundToken(&account_id);
+    const access_token = crypto.makeAccessToken(config.server_secret, &account_id, now + access_token_ttl);
     const refresh_compound = crypto.makeCompoundToken(&account_id);
-    const access_parts = crypto.parseCompoundToken(&access_compound).?;
     const refresh_parts = crypto.parseCompoundToken(&refresh_compound).?;
 
-    // Build new token lists
-    var access_tokens = std.ArrayListUnmanaged(schema.Token){};
-    defer access_tokens.deinit(config.allocator);
+    // Build new refresh token list
     var rts = std.ArrayListUnmanaged(schema.Token){};
     defer rts.deinit(config.allocator);
 
-    // Keep existing unexpired
-    for (locked.data.value.access_tokens) |s| {
-        if (s.expires_at > now) try access_tokens.append(config.allocator, s);
-    }
     for (locked.data.value.refresh_tokens) |r| {
         if (r.expires_at > now) try rts.append(config.allocator, r);
     }
 
-    // Allocate owned copies for new tokens
-    const at_owned = try config.allocator.dupe(u8, &access_parts.token_part);
-    defer config.allocator.free(at_owned);
     const rt_owned = try config.allocator.dupe(u8, &refresh_parts.token_part);
     defer config.allocator.free(rt_owned);
     const did_owned = try config.allocator.dupe(u8, &device_id);
     defer config.allocator.free(did_owned);
 
-    try access_tokens.append(config.allocator, .{
-        .token = at_owned,
-        .device_id = did_owned,
-        .expires_at = now + access_token_ttl,
-    });
     try rts.append(config.allocator, .{
         .token = rt_owned,
         .device_id = did_owned,
@@ -275,7 +251,6 @@ pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const 
     const new_data = schema.AccountData{
         .account = locked.data.value.account,
         .devices = locked.data.value.devices,
-        .access_tokens = access_tokens.items,
         .refresh_tokens = rts.items,
         .challenges = challenges.items,
     };
@@ -285,29 +260,18 @@ pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const 
     return .{
         .account_id = account_id,
         .tokens = .{
-            .access_token = access_compound,
+            .access_token = access_token,
             .refresh_token = refresh_compound,
             .expires_at = now + access_token_ttl,
         },
     };
 }
 
-/// Validate a compound access token. Returns the account_id.
+/// Validate an HMAC-signed access token. Pure computation — no I/O.
 pub fn validateToken(config: Config, token: []const u8) !?[crypto.uuid_len]u8 {
-    const parts = crypto.parseCompoundToken(token) orelse return AuthError.TokenNotFound;
-
-    var locked = (try persist.openAndLockAccount(config.allocator, config.base_dir, &parts.account_id)) orelse
+    const parts = crypto.validateAccessToken(config.server_secret, token) orelse
         return AuthError.TokenNotFound;
-    defer locked.deinit();
-
-    const now = crypto.timestamp();
-    for (locked.data.value.access_tokens) |s| {
-        if (std.mem.eql(u8, s.token, &parts.token_part)) {
-            if (s.expires_at <= now) return AuthError.TokenExpired;
-            return parts.account_id;
-        }
-    }
-    return AuthError.TokenNotFound;
+    return parts.account_id;
 }
 
 /// Refresh tokens using a compound refresh token.
@@ -323,8 +287,6 @@ pub fn refreshTokens(config: Config, refresh_token: []const u8) !TokenPair {
     var found_device_id: ?[]const u8 = null;
     var rts = std.ArrayListUnmanaged(schema.Token){};
     defer rts.deinit(config.allocator);
-    var access_tokens = std.ArrayListUnmanaged(schema.Token){};
-    defer access_tokens.deinit(config.allocator);
 
     for (locked.data.value.refresh_tokens) |r| {
         if (found_device_id == null and std.mem.eql(u8, r.token, &parts.token_part)) {
@@ -346,26 +308,13 @@ pub fn refreshTokens(config: Config, refresh_token: []const u8) !TokenPair {
 
     const device_id = found_device_id.?;
 
-    // Keep existing unexpired access tokens
-    for (locked.data.value.access_tokens) |s| {
-        if (s.expires_at > now) try access_tokens.append(config.allocator, s);
-    }
-
-    const access_compound = crypto.makeCompoundToken(&parts.account_id);
+    const access_token = crypto.makeAccessToken(config.server_secret, &parts.account_id, now + access_token_ttl);
     const refresh_compound = crypto.makeCompoundToken(&parts.account_id);
-    const access_parts = crypto.parseCompoundToken(&access_compound).?;
     const refresh_parts = crypto.parseCompoundToken(&refresh_compound).?;
 
-    const at_owned = try config.allocator.dupe(u8, &access_parts.token_part);
-    defer config.allocator.free(at_owned);
     const rt_owned = try config.allocator.dupe(u8, &refresh_parts.token_part);
     defer config.allocator.free(rt_owned);
 
-    try access_tokens.append(config.allocator, .{
-        .token = at_owned,
-        .device_id = device_id,
-        .expires_at = now + access_token_ttl,
-    });
     try rts.append(config.allocator, .{
         .token = rt_owned,
         .device_id = device_id,
@@ -382,7 +331,6 @@ pub fn refreshTokens(config: Config, refresh_token: []const u8) !TokenPair {
     const new_data = schema.AccountData{
         .account = locked.data.value.account,
         .devices = locked.data.value.devices,
-        .access_tokens = access_tokens.items,
         .refresh_tokens = rts.items,
         .challenges = challenges.items,
     };
@@ -390,7 +338,7 @@ pub fn refreshTokens(config: Config, refresh_token: []const u8) !TokenPair {
     try persist.writeAndUnlockAccount(config.allocator, &locked, new_data);
 
     return .{
-        .access_token = access_compound,
+        .access_token = access_token,
         .refresh_token = refresh_compound,
         .expires_at = now + access_token_ttl,
     };
@@ -439,7 +387,7 @@ pub fn linkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, public
     const new_data = schema.AccountData{
         .account = locked.data.value.account,
         .devices = devices.items,
-        .access_tokens = locked.data.value.access_tokens,
+
         .refresh_tokens = locked.data.value.refresh_tokens,
         .challenges = locked.data.value.challenges,
     };
@@ -486,7 +434,7 @@ pub fn unlinkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, devi
     const new_data = schema.AccountData{
         .account = locked.data.value.account,
         .devices = devices.items,
-        .access_tokens = locked.data.value.access_tokens,
+
         .refresh_tokens = locked.data.value.refresh_tokens,
         .challenges = locked.data.value.challenges,
     };
@@ -561,7 +509,9 @@ test "register creates account and returns compound tokens" {
         else => return e,
     };
 
-    const config = Config{ .allocator = allocator, .base_dir = base_dir };
+    var secret: [32]u8 = undefined;
+    std.crypto.random.bytes(&secret);
+    const config = Config{ .allocator = allocator, .base_dir = base_dir, .server_secret = &secret };
 
     const kp = Ed25519.KeyPair.generate();
     const pk_hex = crypto.hexEncode(32, &kp.public_key.bytes);
@@ -569,7 +519,7 @@ test "register creates account and returns compound tokens" {
     const result = try register(config, &pk_hex, "test device");
 
     // Compound tokens should be 101 chars with colon at position 36
-    try std.testing.expectEqual(@as(usize, crypto.compound_token_len), result.tokens.access_token.len);
+    try std.testing.expectEqual(@as(usize, crypto.access_token_len), result.tokens.access_token.len);
     try std.testing.expectEqual(@as(u8, ':'), result.tokens.access_token[crypto.uuid_len]);
     try std.testing.expect(result.tokens.expires_at > crypto.timestamp());
 
@@ -597,7 +547,9 @@ test "register rejects duplicate public key" {
         else => return e,
     };
 
-    const config = Config{ .allocator = allocator, .base_dir = base_dir };
+    var secret: [32]u8 = undefined;
+    std.crypto.random.bytes(&secret);
+    const config = Config{ .allocator = allocator, .base_dir = base_dir, .server_secret = &secret };
 
     const kp = Ed25519.KeyPair.generate();
     const pk_hex = crypto.hexEncode(32, &kp.public_key.bytes);
@@ -625,7 +577,9 @@ test "challenge-login flow with compound tokens" {
         else => return e,
     };
 
-    const config = Config{ .allocator = allocator, .base_dir = base_dir };
+    var secret: [32]u8 = undefined;
+    std.crypto.random.bytes(&secret);
+    const config = Config{ .allocator = allocator, .base_dir = base_dir, .server_secret = &secret };
 
     const kp = Ed25519.KeyPair.generate();
     const pk_hex = crypto.hexEncode(32, &kp.public_key.bytes);
@@ -642,7 +596,7 @@ test "challenge-login flow with compound tokens" {
 
     // Login
     const login_result = try login(config, &pk_hex, &challenge_result.challenge, &sig_hex);
-    try std.testing.expectEqual(@as(usize, crypto.compound_token_len), login_result.tokens.access_token.len);
+    try std.testing.expectEqual(@as(usize, crypto.access_token_len), login_result.tokens.access_token.len);
     try std.testing.expect(login_result.tokens.expires_at > crypto.timestamp());
 }
 
@@ -664,7 +618,9 @@ test "login rejects bad signature" {
         else => return e,
     };
 
-    const config = Config{ .allocator = allocator, .base_dir = base_dir };
+    var secret: [32]u8 = undefined;
+    std.crypto.random.bytes(&secret);
+    const config = Config{ .allocator = allocator, .base_dir = base_dir, .server_secret = &secret };
 
     const kp = Ed25519.KeyPair.generate();
     const pk_hex = crypto.hexEncode(32, &kp.public_key.bytes);

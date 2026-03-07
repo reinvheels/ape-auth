@@ -227,7 +227,6 @@ test "createAccountFile and openAndLockAccount roundtrip" {
     const data = schema.AccountData{
         .account = .{ .id = &account_id, .created_at = 1000 },
         .devices = &devices,
-        .access_tokens = &.{},
         .refresh_tokens = &.{},
     };
 

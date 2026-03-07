@@ -8,8 +8,8 @@ const Server = @This();
 
 config: auth.Config,
 
-pub fn init(allocator: Allocator, base_dir: []const u8) Server {
-    return .{ .config = .{ .allocator = allocator, .base_dir = base_dir } };
+pub fn init(allocator: Allocator, base_dir: []const u8, server_secret: *const [32]u8) Server {
+    return .{ .config = .{ .allocator = allocator, .base_dir = base_dir, .server_secret = server_secret } };
 }
 
 pub fn handleConnection(self: *Server, conn: net.Server.Connection) void {

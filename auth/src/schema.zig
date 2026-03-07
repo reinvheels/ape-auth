@@ -5,7 +5,6 @@ const Allocator = std.mem.Allocator;
 pub const AccountData = struct {
     account: Account,
     devices: []const Device,
-    access_tokens: []const Token,
     refresh_tokens: []const Token,
     challenges: []const Challenge = &.{},
 };
@@ -57,16 +56,9 @@ test "serialize and parse roundtrip" {
         .name = "my device",
         .created_at = 1000,
     }};
-    const access_tokens = [_]Token{.{
-        .token = "a" ** crypto.token_len,
-        .device_id = device_id,
-        .expires_at = 9999999999,
-    }};
-
     const data = AccountData{
         .account = .{ .id = account_id, .created_at = 1000 },
         .devices = &devices,
-        .access_tokens = &access_tokens,
         .refresh_tokens = &.{},
         .challenges = &.{},
     };
@@ -80,5 +72,5 @@ test "serialize and parse roundtrip" {
     try std.testing.expectEqualStrings(account_id, parsed.value.account.id);
     try std.testing.expectEqual(@as(usize, 1), parsed.value.devices.len);
     try std.testing.expectEqualStrings("my device", parsed.value.devices[0].name);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.access_tokens.len);
+    try std.testing.expectEqual(@as(usize, 0), parsed.value.refresh_tokens.len);
 }

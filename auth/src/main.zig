@@ -46,7 +46,22 @@ pub fn main() !void {
         else => return err,
     };
 
-    var server = Server.init(allocator, data_dir);
+    const secret_path = try std.fmt.allocPrint(allocator, "{s}/server.key", .{data_dir});
+    defer allocator.free(secret_path);
+    var server_secret: [32]u8 = undefined;
+    if (std.fs.openFileAbsolute(secret_path, .{})) |file| {
+        defer file.close();
+        const n = try file.readAll(&server_secret);
+        if (n != 32) return error.InvalidServerKey;
+    } else |_| {
+        std.crypto.random.bytes(&server_secret);
+        const file = try std.fs.createFileAbsolute(secret_path, .{});
+        try file.writeAll(&server_secret);
+        file.close();
+        std.log.info("generated new server secret", .{});
+    }
+
+    var server = Server.init(allocator, data_dir, &server_secret);
 
     const address = net.Address.parseIp("0.0.0.0", port) catch unreachable;
     var tcp = try address.listen(.{ .reuse_address = true });
