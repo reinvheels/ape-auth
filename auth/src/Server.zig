@@ -239,7 +239,7 @@ fn handleUnlinkDevice(self: *Server, headers: []const u8, body: []const u8, stre
     auth.unlinkDevice(self.config, &account_id, req.device_id) catch |err| {
         switch (err) {
             error.DeviceNotFound => sendError(stream, .not_found, "device not found"),
-            error.DeviceNotOwned => sendError(stream, .unauthorized, "device not owned by account"),
+
             error.CannotRemoveLastDevice => sendError(stream, .bad_request, "cannot remove last device"),
             error.AccountNotFound => sendError(stream, .not_found, "account not found"),
             else => sendError(stream, .internal_server_error, "internal error"),

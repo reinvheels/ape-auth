@@ -217,9 +217,8 @@ test "createAccountFile and openAndLockAccount roundtrip" {
     const device_id = "d1d2d3d4-d5d6-d7d8-d9da-dbdcdddedfee".*;
     const pk_hex: []const u8 = "ab" ** 32;
 
-    const devices = [_]schema.DeviceJson{.{
+    const devices = [_]schema.Device{.{
         .id = &device_id,
-        .account_id = &account_id,
         .public_key = pk_hex,
         .name = "test device",
         .created_at = 1000,
@@ -228,7 +227,7 @@ test "createAccountFile and openAndLockAccount roundtrip" {
     const data = schema.AccountData{
         .account = .{ .id = &account_id, .created_at = 1000 },
         .devices = &devices,
-        .sessions = &.{},
+        .access_tokens = &.{},
         .refresh_tokens = &.{},
     };
 

@@ -3,39 +3,32 @@ const crypto = @import("crypto.zig");
 const Allocator = std.mem.Allocator;
 
 pub const AccountData = struct {
-    account: AccountJson,
-    devices: []const DeviceJson,
-    sessions: []const SessionJson,
-    refresh_tokens: []const RefreshTokenJson,
-    challenges: []const ChallengeJson = &.{},
+    account: Account,
+    devices: []const Device,
+    access_tokens: []const Token,
+    refresh_tokens: []const Token,
+    challenges: []const Challenge = &.{},
 };
 
-pub const AccountJson = struct {
+pub const Account = struct {
     id: []const u8,
     created_at: i64,
 };
 
-pub const DeviceJson = struct {
+pub const Device = struct {
     id: []const u8,
-    account_id: []const u8,
     public_key: []const u8,
     name: []const u8,
     created_at: i64,
 };
 
-pub const SessionJson = struct {
+pub const Token = struct {
     token: []const u8,
     device_id: []const u8,
     expires_at: i64,
 };
 
-pub const RefreshTokenJson = struct {
-    token: []const u8,
-    device_id: []const u8,
-    expires_at: i64,
-};
-
-pub const ChallengeJson = struct {
+pub const Challenge = struct {
     nonce: []const u8,
     device_id: []const u8,
     expires_at: i64,
@@ -58,14 +51,13 @@ test "serialize and parse roundtrip" {
     const device_id = "d1d2d3d4-d5d6-d7d8-d9da-dbdcdddedfee";
     const pk_hex = "deadbeef" ++ "deadbeef" ++ "deadbeef" ++ "deadbeef" ++ "deadbeef" ++ "deadbeef" ++ "deadbeef" ++ "deadbeef";
 
-    const devices = [_]DeviceJson{.{
+    const devices = [_]Device{.{
         .id = device_id,
-        .account_id = account_id,
         .public_key = pk_hex,
         .name = "my device",
         .created_at = 1000,
     }};
-    const sessions = [_]SessionJson{.{
+    const access_tokens = [_]Token{.{
         .token = "a" ** crypto.token_len,
         .device_id = device_id,
         .expires_at = 9999999999,
@@ -74,7 +66,7 @@ test "serialize and parse roundtrip" {
     const data = AccountData{
         .account = .{ .id = account_id, .created_at = 1000 },
         .devices = &devices,
-        .sessions = &sessions,
+        .access_tokens = &access_tokens,
         .refresh_tokens = &.{},
         .challenges = &.{},
     };
@@ -88,5 +80,5 @@ test "serialize and parse roundtrip" {
     try std.testing.expectEqualStrings(account_id, parsed.value.account.id);
     try std.testing.expectEqual(@as(usize, 1), parsed.value.devices.len);
     try std.testing.expectEqualStrings("my device", parsed.value.devices[0].name);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.sessions.len);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.access_tokens.len);
 }
