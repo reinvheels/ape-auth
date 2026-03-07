@@ -7,11 +7,10 @@ const Allocator = std.mem.Allocator;
 
 const Server = @This();
 
-store: *Store,
-allocator: Allocator,
+config: auth.Config,
 
-pub fn init(allocator: Allocator, store: *Store) Server {
-    return .{ .allocator = allocator, .store = store };
+pub fn init(allocator: Allocator, base_dir: []const u8) Server {
+    return .{ .config = .{ .allocator = allocator, .base_dir = base_dir } };
 }
 
 pub fn handleConnection(self: *Server, conn: net.Server.Connection) void {
@@ -20,7 +19,6 @@ pub fn handleConnection(self: *Server, conn: net.Server.Connection) void {
     var buf: [8192]u8 = undefined;
     var total: usize = 0;
 
-    // Read the full request
     while (total < buf.len) {
         const n = conn.stream.read(buf[total..]) catch return;
         if (n == 0) break;
@@ -80,7 +78,7 @@ fn handleRegister(self: *Server, body: []const u8, stream: net.Stream) void {
         return;
     };
 
-    const result = auth.register(self.store, req.public_key, req.device_name) catch |err| {
+    const result = auth.register(self.config, req.public_key, req.device_name) catch |err| {
         switch (err) {
             error.DeviceAlreadyExists => sendError(stream, .conflict, "device already registered"),
             error.InvalidPublicKey => sendError(stream, .bad_request, "invalid public key"),
@@ -89,7 +87,7 @@ fn handleRegister(self: *Server, body: []const u8, stream: net.Stream) void {
         return;
     };
 
-    var body_buf: [512]u8 = undefined;
+    var body_buf: [600]u8 = undefined;
     const resp_body = std.fmt.bufPrint(&body_buf,
         \\{{"account_id":"{s}","device_id":"{s}","access_token":"{s}","refresh_token":"{s}","expires_at":{d}}}
     , .{
@@ -112,7 +110,7 @@ fn handleChallenge(self: *Server, body: []const u8, stream: net.Stream) void {
         return;
     };
 
-    const result = auth.createChallenge(self.store, req.public_key) catch |err| {
+    const result = auth.createChallenge(self.config, req.public_key) catch |err| {
         switch (err) {
             error.DeviceNotFound => sendError(stream, .not_found, "device not found"),
             error.InvalidPublicKey => sendError(stream, .bad_request, "invalid public key"),
@@ -138,7 +136,7 @@ fn handleLogin(self: *Server, body: []const u8, stream: net.Stream) void {
         return;
     };
 
-    const result = auth.login(self.store, req.public_key, req.challenge, req.signature) catch |err| {
+    const result = auth.login(self.config, req.public_key, req.challenge, req.signature) catch |err| {
         switch (err) {
             error.InvalidSignature => sendError(stream, .unauthorized, "invalid signature"),
             error.ChallengeNotFound => sendError(stream, .bad_request, "challenge not found"),
@@ -151,7 +149,7 @@ fn handleLogin(self: *Server, body: []const u8, stream: net.Stream) void {
         return;
     };
 
-    var body_buf: [512]u8 = undefined;
+    var body_buf: [600]u8 = undefined;
     const resp_body = std.fmt.bufPrint(&body_buf,
         \\{{"account_id":"{s}","access_token":"{s}","refresh_token":"{s}","expires_at":{d}}}
     , .{
@@ -173,7 +171,7 @@ fn handleRefresh(self: *Server, body: []const u8, stream: net.Stream) void {
         return;
     };
 
-    const tokens = auth.refreshTokens(self.store, req.refresh_token) catch |err| {
+    const tokens = auth.refreshTokens(self.config, req.refresh_token) catch |err| {
         switch (err) {
             error.TokenNotFound => sendError(stream, .unauthorized, "invalid refresh token"),
             error.TokenExpired => sendError(stream, .unauthorized, "refresh token expired"),
@@ -182,7 +180,7 @@ fn handleRefresh(self: *Server, body: []const u8, stream: net.Stream) void {
         return;
     };
 
-    var body_buf: [256]u8 = undefined;
+    var body_buf: [400]u8 = undefined;
     const resp_body = std.fmt.bufPrint(&body_buf,
         \\{{"access_token":"{s}","refresh_token":"{s}","expires_at":{d}}}
     , .{ tokens.access_token, tokens.refresh_token, tokens.expires_at }) catch {
@@ -204,12 +202,16 @@ fn handleLinkDevice(self: *Server, headers: []const u8, body: []const u8, stream
         return;
     };
 
-    const device_id = auth.linkDevice(self.store, &account_id, req.public_key, req.device_name) catch |err| {
+    const device_id = auth.linkDevice(self.config, &account_id, req.public_key, req.device_name) catch |err| {
         switch (err) {
             error.DeviceAlreadyExists => sendError(stream, .conflict, "device already exists"),
             error.InvalidPublicKey => sendError(stream, .bad_request, "invalid public key"),
+            error.AccountNotFound => sendError(stream, .not_found, "account not found"),
             else => sendError(stream, .internal_server_error, "internal error"),
         }
+        return;
+    } orelse {
+        sendError(stream, .internal_server_error, "internal error");
         return;
     };
 
@@ -235,11 +237,12 @@ fn handleUnlinkDevice(self: *Server, headers: []const u8, body: []const u8, stre
         return;
     };
 
-    auth.unlinkDevice(self.store, &account_id, req.device_id) catch |err| {
+    auth.unlinkDevice(self.config, &account_id, req.device_id) catch |err| {
         switch (err) {
             error.DeviceNotFound => sendError(stream, .not_found, "device not found"),
             error.DeviceNotOwned => sendError(stream, .unauthorized, "device not owned by account"),
             error.CannotRemoveLastDevice => sendError(stream, .bad_request, "cannot remove last device"),
+            error.AccountNotFound => sendError(stream, .not_found, "account not found"),
             else => sendError(stream, .internal_server_error, "internal error"),
         }
         return;
@@ -254,16 +257,18 @@ fn handleGetAccount(self: *Server, headers: []const u8, stream: net.Stream) void
         return;
     };
 
-    const info = auth.getAccountInfo(self.allocator, self.store, &account_id) catch {
+    const info = auth.getAccountInfo(self.config, &account_id) catch {
         sendError(stream, .internal_server_error, "internal error");
         return;
     } orelse {
         sendError(stream, .not_found, "account not found");
         return;
     };
-    defer self.allocator.free(info.devices);
+    defer {
+        for (info.devices) |d| self.config.allocator.free(d.name);
+        self.config.allocator.free(info.devices);
+    }
 
-    // Build response JSON using Io.Writer.fixed
     var body_buf: [4096]u8 = undefined;
     var w = std.Io.Writer.fixed(&body_buf);
 
@@ -291,9 +296,7 @@ fn handleGetAccount(self: *Server, headers: []const u8, stream: net.Stream) void
 
 fn authenticate(self: *Server, headers: []const u8) auth.AuthError![Store.uuid_len]u8 {
     const token = extractBearerToken(headers) orelse return auth.AuthError.Unauthorized;
-    self.store.lock();
-    defer self.store.unlock();
-    return auth.validateToken(self.store, token);
+    return (auth.validateToken(self.config, token) catch return auth.AuthError.Unauthorized) orelse return auth.AuthError.Unauthorized;
 }
 
 // --- Helpers ---
