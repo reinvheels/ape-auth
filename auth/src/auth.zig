@@ -315,16 +315,8 @@ pub fn refreshTokens(config: Config, refresh_token: []const u8) !TokenPair {
         .expires_at = now + refresh_token_ttl,
     });
 
-    // Prune expired challenges
-    var challenges = std.ArrayListUnmanaged(schema.Challenge){};
-    defer challenges.deinit(config.allocator);
-    for (locked.data.value.challenges) |ch| {
-        if (ch.expires_at > now) try challenges.append(config.allocator, ch);
-    }
-
     var new_data = locked.data.value;
     new_data.refresh_tokens = rts.items;
-    new_data.challenges = challenges.items;
 
     try persist.writeAndUnlockAccount(config.allocator, &locked, new_data);
 
