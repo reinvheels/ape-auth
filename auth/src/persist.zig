@@ -99,10 +99,8 @@ pub fn openAndLockAccount(allocator: Allocator, base_dir: []const u8, account_id
     };
 }
 
-/// Write new data to the account file (atomic tmp+rename) and release the lock.
+/// Write new data to the account file (atomic tmp+rename). Caller must deinit locked.
 pub fn writeAndUnlockAccount(allocator: Allocator, locked: *LockedAccount, new_data: schema.AccountData) !void {
-    defer locked.deinit();
-
     const path = try accountPath(allocator, locked.base_dir, &locked.account_id);
     defer allocator.free(path);
 

@@ -142,12 +142,11 @@ pub fn createChallenge(config: Config, public_key_hex: []const u8) !ChallengeRes
 
     var locked = (try persist.openAndLockAccount(config.allocator, config.base_dir, &account_id)) orelse
         return AuthError.DeviceNotFound;
+    defer locked.deinit();
 
     // Find device_id for this public key
-    const device_id = findDeviceByKey(locked.data.value.devices, public_key_hex) orelse {
-        locked.deinit();
+    const device_id = findDeviceByKey(locked.data.value.devices, public_key_hex) orelse
         return AuthError.DeviceNotFound;
-    };
 
     const now = crypto.timestamp();
     var nonce: [32]u8 = undefined;
@@ -210,6 +209,7 @@ pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const 
 
     var locked = (try persist.openAndLockAccount(config.allocator, config.base_dir, &account_id)) orelse
         return AuthError.DeviceNotFound;
+    defer locked.deinit();
 
     const now = crypto.timestamp();
 
@@ -220,27 +220,18 @@ pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const 
 
     for (locked.data.value.challenges) |ch| {
         if (found_device_id == null and std.mem.eql(u8, ch.nonce, challenge_hex)) {
-            if (ch.expires_at <= now) {
-                locked.deinit();
-                return AuthError.ChallengeExpired;
-            }
+            if (ch.expires_at <= now) return AuthError.ChallengeExpired;
             found_device_id = ch.device_id[0..crypto.uuid_len].*;
         } else if (ch.expires_at > now) {
             try challenges.append(config.allocator, ch);
         }
     }
 
-    if (found_device_id == null) {
-        locked.deinit();
-        return AuthError.ChallengeNotFound;
-    }
+    if (found_device_id == null) return AuthError.ChallengeNotFound;
 
     const device_id = found_device_id.?;
 
-    const tokens = makeTokenPair(config, &account_id) catch |err| {
-        locked.deinit();
-        return err;
-    };
+    const tokens = try makeTokenPair(config, &account_id);
     errdefer config.allocator.free(tokens.id_token);
 
     const refresh_parts = crypto.parseCompoundToken(&tokens.refresh_token).?;
@@ -295,6 +286,7 @@ pub fn refreshTokens(config: Config, refresh_token: []const u8) !TokenPair {
 
     var locked = (try persist.openAndLockAccount(config.allocator, config.base_dir, &parts.account_id)) orelse
         return AuthError.TokenNotFound;
+    defer locked.deinit();
 
     const now = crypto.timestamp();
 
@@ -305,27 +297,18 @@ pub fn refreshTokens(config: Config, refresh_token: []const u8) !TokenPair {
 
     for (locked.data.value.refresh_tokens) |r| {
         if (found_device_id == null and std.mem.eql(u8, r.token, &parts.token_part)) {
-            if (r.expires_at <= now) {
-                locked.deinit();
-                return AuthError.TokenExpired;
-            }
+            if (r.expires_at <= now) return AuthError.TokenExpired;
             found_device_id = r.device_id;
         } else {
             try rts.append(config.allocator, r);
         }
     }
 
-    if (found_device_id == null) {
-        locked.deinit();
-        return AuthError.TokenNotFound;
-    }
+    if (found_device_id == null) return AuthError.TokenNotFound;
 
     const device_id = found_device_id.?;
 
-    const tokens = makeTokenPair(config, &parts.account_id) catch |err| {
-        locked.deinit();
-        return err;
-    };
+    const tokens = try makeTokenPair(config, &parts.account_id);
     errdefer config.allocator.free(tokens.id_token);
 
     const refresh_parts = crypto.parseCompoundToken(&tokens.refresh_token).?;
@@ -365,17 +348,12 @@ pub fn linkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, public
 
     var locked = (try persist.openAndLockAccount(config.allocator, config.base_dir, account_id)) orelse
         return AuthError.AccountNotFound;
+    defer locked.deinit();
 
     // Write key index first (atomic dup check)
     persist.writeKeyIndex(config.allocator, config.base_dir, public_key_hex, account_id) catch |err| switch (err) {
-        error.DeviceAlreadyExists => {
-            locked.deinit();
-            return AuthError.DeviceAlreadyExists;
-        },
-        else => {
-            locked.deinit();
-            return err;
-        },
+        error.DeviceAlreadyExists => return AuthError.DeviceAlreadyExists,
+        else => return err,
     };
 
     const device_id = crypto.generateUuid();
@@ -418,11 +396,9 @@ pub fn unlinkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, devi
 
     var locked = (try persist.openAndLockAccount(config.allocator, config.base_dir, account_id)) orelse
         return AuthError.AccountNotFound;
+    defer locked.deinit();
 
-    if (locked.data.value.devices.len <= 1) {
-        locked.deinit();
-        return AuthError.CannotRemoveLastDevice;
-    }
+    if (locked.data.value.devices.len <= 1) return AuthError.CannotRemoveLastDevice;
 
     var devices = std.ArrayListUnmanaged(schema.Device){};
     defer devices.deinit(config.allocator);
@@ -436,10 +412,7 @@ pub fn unlinkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, devi
         }
     }
 
-    if (removed_pk == null) {
-        locked.deinit();
-        return AuthError.DeviceNotFound;
-    }
+    if (removed_pk == null) return AuthError.DeviceNotFound;
 
     const new_data = schema.AccountData{
         .account = locked.data.value.account,
