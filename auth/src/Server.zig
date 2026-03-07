@@ -57,35 +57,35 @@ pub fn handleConnection(self: *Server, conn: net.Server.Connection) void {
 
 fn route(self: *Server, method: []const u8, path: []const u8, headers: []const u8, body: []const u8, stream: net.Stream) !void {
     // OIDC discovery
-    if (eql(method, "GET") and eql(path, "/.well-known/openid-configuration")) {
+    if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/.well-known/openid-configuration")) {
         self.handleDiscovery(stream);
-    } else if (eql(method, "GET") and eql(path, "/.well-known/jwks.json")) {
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/.well-known/jwks.json")) {
         self.handleJwks(stream);
     }
     // OIDC token + userinfo
-    else if (eql(method, "POST") and eql(path, "/token")) {
+    else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/token")) {
         self.handleToken(body, stream);
-    } else if (eql(method, "GET") and eql(path, "/userinfo")) {
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/userinfo")) {
         self.handleUserinfo(headers, stream);
     }
     // Device auth
-    else if (eql(method, "POST") and eql(path, "/auth/register")) {
+    else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/auth/register")) {
         self.handleRegister(body, stream);
-    } else if (eql(method, "POST") and eql(path, "/auth/challenge")) {
+    } else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/auth/challenge")) {
         self.handleChallenge(body, stream);
-    } else if (eql(method, "POST") and eql(path, "/auth/login")) {
+    } else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/auth/login")) {
         self.handleLogin(body, stream);
     }
     // Device management
-    else if (eql(method, "POST") and eql(path, "/auth/devices/link")) {
+    else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/auth/devices/link")) {
         self.handleLinkDevice(headers, body, stream);
-    } else if (eql(method, "POST") and eql(path, "/auth/devices/unlink")) {
+    } else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/auth/devices/unlink")) {
         self.handleUnlinkDevice(headers, body, stream);
-    } else if (eql(method, "GET") and eql(path, "/auth/account")) {
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/auth/account")) {
         self.handleGetAccount(headers, stream);
     }
     // Health
-    else if (eql(method, "GET") and eql(path, "/health")) {
+    else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/health")) {
         sendJson(stream, .ok, "{\"status\":\"ok\"}");
     } else {
         sendError(stream, .not_found, "not found");
@@ -123,7 +123,7 @@ fn handleToken(self: *Server, body: []const u8, stream: net.Stream) void {
         return;
     };
 
-    if (eql(grant_type, "refresh_token")) {
+    if (std.mem.eql(u8, grant_type, "refresh_token")) {
         const refresh_token = getFormParam(body, "refresh_token") orelse {
             sendError(stream, .bad_request, "missing refresh_token");
             return;
@@ -147,8 +147,8 @@ fn handleRefreshGrant(self: *Server, refresh_token: []const u8, stream: net.Stre
 
     var body_buf: [2048]u8 = undefined;
     const resp_body = std.fmt.bufPrint(&body_buf,
-        \\{{"id_token":"{s}","token_type":"Bearer","expires_in":{d},"refresh_token":"{s}"}}
-    , .{ tokens.id_token, tokens.expires_in, tokens.refresh_token }) catch {
+        \\{{"id_token":"{s}","access_token":"{s}","token_type":"Bearer","expires_in":{d},"refresh_token":"{s}"}}
+    , .{ tokens.id_token, tokens.id_token, tokens.expires_in, tokens.refresh_token }) catch {
         sendError(stream, .internal_server_error, "internal error");
         return;
     };
@@ -195,10 +195,11 @@ fn handleRegister(self: *Server, body: []const u8, stream: net.Stream) void {
 
     var body_buf: [2048]u8 = undefined;
     const resp_body = std.fmt.bufPrint(&body_buf,
-        \\{{"account_id":"{s}","device_id":"{s}","id_token":"{s}","refresh_token":"{s}","expires_in":{d}}}
+        \\{{"account_id":"{s}","device_id":"{s}","id_token":"{s}","access_token":"{s}","refresh_token":"{s}","expires_in":{d}}}
     , .{
         result.account_id,
         result.device_id,
+        result.tokens.id_token,
         result.tokens.id_token,
         result.tokens.refresh_token,
         result.tokens.expires_in,
@@ -258,9 +259,10 @@ fn handleLogin(self: *Server, body: []const u8, stream: net.Stream) void {
 
     var body_buf: [2048]u8 = undefined;
     const resp_body = std.fmt.bufPrint(&body_buf,
-        \\{{"account_id":"{s}","id_token":"{s}","refresh_token":"{s}","expires_in":{d}}}
+        \\{{"account_id":"{s}","id_token":"{s}","access_token":"{s}","refresh_token":"{s}","expires_in":{d}}}
     , .{
         result.account_id,
+        result.tokens.id_token,
         result.tokens.id_token,
         result.tokens.refresh_token,
         result.tokens.expires_in,
@@ -395,7 +397,10 @@ fn sendError(stream: net.Stream, status: std.http.Status, message: []const u8) v
 }
 
 fn parseJson(comptime T: type, body: []const u8) !T {
-    const parsed = try std.json.parseFromSlice(T, std.heap.page_allocator, body, .{});
+    // Slices in the returned value reference body, not the parse arena,
+    // so it's safe to free the arena here. Body outlives the handler scope.
+    var parsed = try std.json.parseFromSlice(T, std.heap.page_allocator, body, .{});
+    defer parsed.deinit();
     return parsed.value;
 }
 
@@ -455,9 +460,6 @@ fn parseContentLength(headers: []const u8) usize {
     return 0;
 }
 
-fn eql(a: []const u8, b: []const u8) bool {
-    return std.mem.eql(u8, a, b);
-}
 
 test "extractBearerToken" {
     const headers = "Host: localhost\r\nAuthorization: Bearer abc123\r\nAccept: */*";
