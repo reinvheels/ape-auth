@@ -174,12 +174,8 @@ pub fn createChallenge(config: Config, public_key_hex: []const u8) !ChallengeRes
         .expires_at = now + challenge_ttl,
     });
 
-    const new_data = schema.AccountData{
-        .account = locked.data.value.account,
-        .devices = locked.data.value.devices,
-        .refresh_tokens = locked.data.value.refresh_tokens,
-        .challenges = challenges.items,
-    };
+    var new_data = locked.data.value;
+    new_data.challenges = challenges.items;
 
     try persist.writeAndUnlockAccount(config.allocator, &locked, new_data);
 
@@ -255,12 +251,9 @@ pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const 
         .expires_at = now + refresh_token_ttl,
     });
 
-    const new_data = schema.AccountData{
-        .account = locked.data.value.account,
-        .devices = locked.data.value.devices,
-        .refresh_tokens = rts.items,
-        .challenges = challenges.items,
-    };
+    var new_data = locked.data.value;
+    new_data.refresh_tokens = rts.items;
+    new_data.challenges = challenges.items;
 
     try persist.writeAndUnlockAccount(config.allocator, &locked, new_data);
 
@@ -329,12 +322,9 @@ pub fn refreshTokens(config: Config, refresh_token: []const u8) !TokenPair {
         if (ch.expires_at > now) try challenges.append(config.allocator, ch);
     }
 
-    const new_data = schema.AccountData{
-        .account = locked.data.value.account,
-        .devices = locked.data.value.devices,
-        .refresh_tokens = rts.items,
-        .challenges = challenges.items,
-    };
+    var new_data = locked.data.value;
+    new_data.refresh_tokens = rts.items;
+    new_data.challenges = challenges.items;
 
     try persist.writeAndUnlockAccount(config.allocator, &locked, new_data);
 
@@ -375,12 +365,8 @@ pub fn linkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, public
         .created_at = now,
     });
 
-    const new_data = schema.AccountData{
-        .account = locked.data.value.account,
-        .devices = devices.items,
-        .refresh_tokens = locked.data.value.refresh_tokens,
-        .challenges = locked.data.value.challenges,
-    };
+    var new_data = locked.data.value;
+    new_data.devices = devices.items;
 
     persist.writeAndUnlockAccount(config.allocator, &locked, new_data) catch |err| {
         persist.removeKeyIndex(config.allocator, config.base_dir, public_key_hex) catch {};
@@ -414,12 +400,8 @@ pub fn unlinkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, devi
 
     if (removed_pk == null) return AuthError.DeviceNotFound;
 
-    const new_data = schema.AccountData{
-        .account = locked.data.value.account,
-        .devices = devices.items,
-        .refresh_tokens = locked.data.value.refresh_tokens,
-        .challenges = locked.data.value.challenges,
-    };
+    var new_data = locked.data.value;
+    new_data.devices = devices.items;
 
     try persist.writeAndUnlockAccount(config.allocator, &locked, new_data);
 
