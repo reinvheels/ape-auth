@@ -1,13 +1,12 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+const Ed25519 = std.crypto.sign.Ed25519;
 
 pub const uuid_len = 36; // 16 bytes hex-encoded with dashes (8-4-4-4-12)
 pub const token_len = 64; // 32 bytes hex-encoded
 pub const key_len = 64; // 32 bytes hex-encoded
 pub const sig_len = 128; // 64 bytes hex-encoded
 pub const compound_token_len = uuid_len + 1 + token_len; // "uuid:token" = 101
-const expires_hex_len = 16; // i64 as hex
-const hmac_hex_len = 64; // 32 bytes as hex
-pub const access_token_len = uuid_len + 1 + expires_hex_len + 1 + hmac_hex_len; // "uuid:expires:hmac" = 118
 
 // --- Helpers ---
 
@@ -92,63 +91,122 @@ pub fn timestamp() i64 {
     return std.time.timestamp();
 }
 
-// --- HMAC Access Tokens ---
+// --- Base64url ---
 
-const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
+const b64url = std.base64.url_safe_no_pad;
 
-pub fn makeAccessToken(server_secret: *const [32]u8, account_id: *const [uuid_len]u8, expires_at: i64) [access_token_len]u8 {
-    const expires_bytes: [8]u8 = @bitCast(@as(u64, @bitCast(expires_at)));
-    const expires_hex = hexEncode(8, &expires_bytes);
-
-    var mac: [32]u8 = undefined;
-    var h = HmacSha256.init(server_secret);
-    h.update(account_id);
-    h.update(&expires_bytes);
-    h.final(&mac);
-    const mac_hex = hexEncode(32, &mac);
-
-    var out: [access_token_len]u8 = undefined;
-    @memcpy(out[0..uuid_len], account_id);
-    out[uuid_len] = ':';
-    @memcpy(out[uuid_len + 1 ..][0..expires_hex_len], &expires_hex);
-    out[uuid_len + 1 + expires_hex_len] = ':';
-    @memcpy(out[uuid_len + 1 + expires_hex_len + 1 ..], &mac_hex);
-    return out;
+fn base64urlEncodeAlloc(allocator: Allocator, data: []const u8) ![]const u8 {
+    const len = b64url.Encoder.calcSize(data.len);
+    const buf = try allocator.alloc(u8, len);
+    return b64url.Encoder.encode(buf, data);
 }
 
-pub const AccessTokenParts = struct {
-    account_id: [uuid_len]u8,
-    expires_at: i64,
+// --- JWT (EdDSA / Ed25519) ---
+
+// Pre-encoded: {"alg":"EdDSA","typ":"JWT"}
+const jwt_header_b64 = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9";
+
+pub fn createJwt(
+    allocator: Allocator,
+    key_pair: Ed25519.KeyPair,
+    issuer: []const u8,
+    subject: *const [uuid_len]u8,
+    iat: i64,
+    exp: i64,
+) ![]const u8 {
+    // Build payload JSON
+    var payload_buf: [512]u8 = undefined;
+    const payload_json = std.fmt.bufPrint(&payload_buf,
+        \\{{"iss":"{s}","sub":"{s}","iat":{d},"exp":{d}}}
+    , .{ issuer, subject, iat, exp }) catch return error.PayloadTooLarge;
+
+    // Base64url encode payload
+    const payload_b64 = try base64urlEncodeAlloc(allocator, payload_json);
+    defer allocator.free(payload_b64);
+
+    // Build signing input: header.payload
+    const signing_input = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ jwt_header_b64, payload_b64 });
+    defer allocator.free(signing_input);
+
+    // Sign
+    const sig = try key_pair.sign(signing_input, null);
+    const sig_b64 = try base64urlEncodeAlloc(allocator, &sig.toBytes());
+    defer allocator.free(sig_b64);
+
+    // Build JWT: header.payload.signature
+    return try std.fmt.allocPrint(allocator, "{s}.{s}", .{ signing_input, sig_b64 });
+}
+
+pub const JwtClaims = struct {
+    sub: []const u8,
+    iss: []const u8,
+    iat: i64,
+    exp: i64,
 };
 
-pub fn validateAccessToken(server_secret: *const [32]u8, token: []const u8) ?AccessTokenParts {
-    if (token.len != access_token_len) return null;
-    if (token[uuid_len] != ':') return null;
-    if (token[uuid_len + 1 + expires_hex_len] != ':') return null;
+pub const JwtParseResult = struct {
+    allocator: Allocator,
+    claims: JwtClaims,
+    // Raw decoded payload JSON — claims point into this
+    payload_data: []const u8,
 
-    const account_id = token[0..uuid_len].*;
-    const expires_hex = token[uuid_len + 1 ..][0..expires_hex_len];
-    const mac_hex = token[uuid_len + 1 + expires_hex_len + 1 ..][0..hmac_hex_len];
+    pub fn deinit(self: *JwtParseResult) void {
+        self.allocator.free(self.payload_data);
+    }
+};
 
-    const expires_bytes = hexDecode(8, expires_hex) catch return null;
-    const expires_at: i64 = @bitCast(@as(u64, @bitCast(expires_bytes)));
+/// Verify a JWT signature and extract claims. Caller must call deinit() on result.
+pub fn verifyJwt(
+    allocator: Allocator,
+    public_key: Ed25519.PublicKey,
+    token: []const u8,
+) !JwtParseResult {
+    // Split into header.payload.signature
+    const first_dot = std.mem.indexOfScalar(u8, token, '.') orelse return error.InvalidJwt;
+    const rest = token[first_dot + 1 ..];
+    const second_dot = std.mem.indexOfScalar(u8, rest, '.') orelse return error.InvalidJwt;
 
-    // Recompute HMAC and compare
-    var expected: [32]u8 = undefined;
-    var h = HmacSha256.init(server_secret);
-    h.update(&account_id);
-    h.update(&expires_bytes);
-    h.final(&expected);
-    const expected_hex = hexEncode(32, &expected);
+    const signing_input = token[0 .. first_dot + 1 + second_dot];
+    const sig_b64 = rest[second_dot + 1 ..];
 
-    if (!std.crypto.timing_safe.eql([hmac_hex_len]u8, mac_hex.*, expected_hex)) return null;
+    // Decode and verify signature
+    const sig_len_decoded = b64url.Decoder.calcSizeForSlice(sig_b64) catch return error.InvalidJwt;
+    if (sig_len_decoded != 64) return error.InvalidJwt;
+    var sig_bytes: [64]u8 = undefined;
+    b64url.Decoder.decode(&sig_bytes, sig_b64) catch return error.InvalidJwt;
 
-    if (expires_at <= timestamp()) return null;
+    const sig = Ed25519.Signature.fromBytes(sig_bytes);
+    sig.verify(signing_input, public_key) catch return error.InvalidSignature;
+
+    // Decode payload
+    const payload_b64 = rest[0..second_dot];
+    const payload_len = b64url.Decoder.calcSizeForSlice(payload_b64) catch return error.InvalidJwt;
+    const payload_data = try allocator.alloc(u8, payload_len);
+    errdefer allocator.free(payload_data);
+    b64url.Decoder.decode(payload_data, payload_b64) catch return error.InvalidJwt;
+
+    // Parse claims
+    const parsed = std.json.parseFromSlice(JwtClaims, allocator, payload_data, .{}) catch return error.InvalidJwt;
+    defer parsed.deinit();
+
+    // Check expiry
+    if (parsed.value.exp <= timestamp()) return error.TokenExpired;
 
     return .{
-        .account_id = account_id,
-        .expires_at = expires_at,
+        .allocator = allocator,
+        .claims = parsed.value,
+        .payload_data = payload_data,
     };
+}
+
+/// Generate JWKS JSON for the public key.
+pub fn jwksJson(allocator: Allocator, public_key: Ed25519.PublicKey) ![]const u8 {
+    const x_b64 = try base64urlEncodeAlloc(allocator, &public_key.bytes);
+    defer allocator.free(x_b64);
+
+    return try std.fmt.allocPrint(allocator,
+        \\{{"keys":[{{"kty":"OKP","crv":"Ed25519","use":"sig","alg":"EdDSA","x":"{s}"}}]}}
+    , .{x_b64});
 }
 
 // --- Tests ---
@@ -188,40 +246,71 @@ test "parseCompoundToken rejects bad input" {
     try std.testing.expect(parseCompoundToken("too-short") == null);
     var bad: [compound_token_len]u8 = undefined;
     @memset(&bad, 'x');
-    try std.testing.expect(parseCompoundToken(&bad) == null); // no colon at right position
+    try std.testing.expect(parseCompoundToken(&bad) == null);
 }
 
-test "makeAccessToken and validateAccessToken roundtrip" {
-    var secret: [32]u8 = undefined;
-    std.crypto.random.bytes(&secret);
+test "createJwt and verifyJwt roundtrip" {
+    const allocator = std.testing.allocator;
+    const kp = Ed25519.KeyPair.generate();
     const account_id = generateUuid();
-    const expires_at = timestamp() + 3600;
+    const now = timestamp();
 
-    const token = makeAccessToken(&secret, &account_id, expires_at);
-    try std.testing.expectEqual(@as(usize, access_token_len), token.len);
+    const jwt = try createJwt(allocator, kp, "https://auth.example.com", &account_id, now, now + 3600);
+    defer allocator.free(jwt);
 
-    const parts = validateAccessToken(&secret, &token);
-    try std.testing.expect(parts != null);
-    try std.testing.expectEqualSlices(u8, &account_id, &parts.?.account_id);
-    try std.testing.expectEqual(expires_at, parts.?.expires_at);
+    // Should have 3 dot-separated parts
+    var dots: usize = 0;
+    for (jwt) |c| {
+        if (c == '.') dots += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), dots);
+
+    // Verify
+    var result = try verifyJwt(allocator, kp.public_key, jwt);
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings(&account_id, result.claims.sub);
+    try std.testing.expectEqualStrings("https://auth.example.com", result.claims.iss);
+    try std.testing.expectEqual(now, result.claims.iat);
+    try std.testing.expectEqual(now + 3600, result.claims.exp);
 }
 
-test "validateAccessToken rejects wrong secret" {
-    var secret: [32]u8 = undefined;
-    std.crypto.random.bytes(&secret);
-    var wrong: [32]u8 = undefined;
-    std.crypto.random.bytes(&wrong);
+test "verifyJwt rejects wrong key" {
+    const allocator = std.testing.allocator;
+    const kp = Ed25519.KeyPair.generate();
+    const bad_kp = Ed25519.KeyPair.generate();
     const account_id = generateUuid();
+    const now = timestamp();
 
-    const token = makeAccessToken(&secret, &account_id, timestamp() + 3600);
-    try std.testing.expect(validateAccessToken(&wrong, &token) == null);
+    const jwt = try createJwt(allocator, kp, "https://auth.example.com", &account_id, now, now + 3600);
+    defer allocator.free(jwt);
+
+    const result = verifyJwt(allocator, bad_kp.public_key, jwt);
+    try std.testing.expectError(error.InvalidSignature, result);
 }
 
-test "validateAccessToken rejects expired" {
-    var secret: [32]u8 = undefined;
-    std.crypto.random.bytes(&secret);
+test "verifyJwt rejects expired token" {
+    const allocator = std.testing.allocator;
+    const kp = Ed25519.KeyPair.generate();
     const account_id = generateUuid();
+    const now = timestamp();
 
-    const token = makeAccessToken(&secret, &account_id, timestamp() - 1);
-    try std.testing.expect(validateAccessToken(&secret, &token) == null);
+    const jwt = try createJwt(allocator, kp, "https://auth.example.com", &account_id, now - 7200, now - 3600);
+    defer allocator.free(jwt);
+
+    const result = verifyJwt(allocator, kp.public_key, jwt);
+    try std.testing.expectError(error.TokenExpired, result);
+}
+
+test "jwksJson produces valid JSON" {
+    const allocator = std.testing.allocator;
+    const kp = Ed25519.KeyPair.generate();
+
+    const json = try jwksJson(allocator, kp.public_key);
+    defer allocator.free(json);
+
+    // Should contain expected fields
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"kty\":\"OKP\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"crv\":\"Ed25519\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"alg\":\"EdDSA\"") != null);
 }

@@ -3,13 +3,19 @@ const net = std.net;
 const crypto = @import("crypto.zig");
 const auth = @import("auth.zig");
 const Allocator = std.mem.Allocator;
+const Ed25519 = std.crypto.sign.Ed25519;
 
 const Server = @This();
 
 config: auth.Config,
 
-pub fn init(allocator: Allocator, base_dir: []const u8, server_secret: *const [32]u8) Server {
-    return .{ .config = .{ .allocator = allocator, .base_dir = base_dir, .server_secret = server_secret } };
+pub fn init(allocator: Allocator, base_dir: []const u8, key_pair: Ed25519.KeyPair, issuer: []const u8) Server {
+    return .{ .config = .{
+        .allocator = allocator,
+        .base_dir = base_dir,
+        .key_pair = key_pair,
+        .issuer = issuer,
+    } };
 }
 
 pub fn handleConnection(self: *Server, conn: net.Server.Connection) void {
@@ -50,26 +56,126 @@ pub fn handleConnection(self: *Server, conn: net.Server.Connection) void {
 }
 
 fn route(self: *Server, method: []const u8, path: []const u8, headers: []const u8, body: []const u8, stream: net.Stream) !void {
-    if (eql(method, "POST") and eql(path, "/auth/register")) {
+    // OIDC discovery
+    if (eql(method, "GET") and eql(path, "/.well-known/openid-configuration")) {
+        self.handleDiscovery(stream);
+    } else if (eql(method, "GET") and eql(path, "/.well-known/jwks.json")) {
+        self.handleJwks(stream);
+    }
+    // OIDC token + userinfo
+    else if (eql(method, "POST") and eql(path, "/token")) {
+        self.handleToken(body, stream);
+    } else if (eql(method, "GET") and eql(path, "/userinfo")) {
+        self.handleUserinfo(headers, stream);
+    }
+    // Device auth
+    else if (eql(method, "POST") and eql(path, "/auth/register")) {
         self.handleRegister(body, stream);
     } else if (eql(method, "POST") and eql(path, "/auth/challenge")) {
         self.handleChallenge(body, stream);
     } else if (eql(method, "POST") and eql(path, "/auth/login")) {
         self.handleLogin(body, stream);
-    } else if (eql(method, "POST") and eql(path, "/auth/token/refresh")) {
-        self.handleRefresh(body, stream);
-    } else if (eql(method, "POST") and eql(path, "/auth/devices/link")) {
+    }
+    // Device management
+    else if (eql(method, "POST") and eql(path, "/auth/devices/link")) {
         self.handleLinkDevice(headers, body, stream);
     } else if (eql(method, "POST") and eql(path, "/auth/devices/unlink")) {
         self.handleUnlinkDevice(headers, body, stream);
     } else if (eql(method, "GET") and eql(path, "/auth/account")) {
         self.handleGetAccount(headers, stream);
-    } else if (eql(method, "GET") and eql(path, "/health")) {
+    }
+    // Health
+    else if (eql(method, "GET") and eql(path, "/health")) {
         sendJson(stream, .ok, "{\"status\":\"ok\"}");
     } else {
         sendError(stream, .not_found, "not found");
     }
 }
+
+// --- OIDC Discovery ---
+
+fn handleDiscovery(self: *Server, stream: net.Stream) void {
+    var buf: [2048]u8 = undefined;
+    const body = std.fmt.bufPrint(&buf,
+        \\{{"issuer":"{s}","authorization_endpoint":"{s}/authorize","token_endpoint":"{s}/token","userinfo_endpoint":"{s}/userinfo","jwks_uri":"{s}/.well-known/jwks.json","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["EdDSA"],"scopes_supported":["openid"],"grant_types_supported":["authorization_code","refresh_token"]}}
+    , .{ self.config.issuer, self.config.issuer, self.config.issuer, self.config.issuer, self.config.issuer }) catch {
+        sendError(stream, .internal_server_error, "internal error");
+        return;
+    };
+    sendJson(stream, .ok, body);
+}
+
+fn handleJwks(self: *Server, stream: net.Stream) void {
+    const json = crypto.jwksJson(self.config.allocator, self.config.key_pair.public_key) catch {
+        sendError(stream, .internal_server_error, "internal error");
+        return;
+    };
+    defer self.config.allocator.free(json);
+    sendJson(stream, .ok, json);
+}
+
+// --- OIDC Token Endpoint ---
+
+fn handleToken(self: *Server, body: []const u8, stream: net.Stream) void {
+    // Parse form-urlencoded body
+    const grant_type = getFormParam(body, "grant_type") orelse {
+        sendError(stream, .bad_request, "missing grant_type");
+        return;
+    };
+
+    if (eql(grant_type, "refresh_token")) {
+        const refresh_token = getFormParam(body, "refresh_token") orelse {
+            sendError(stream, .bad_request, "missing refresh_token");
+            return;
+        };
+        self.handleRefreshGrant(refresh_token, stream);
+    } else {
+        sendError(stream, .bad_request, "unsupported grant_type");
+    }
+}
+
+fn handleRefreshGrant(self: *Server, refresh_token: []const u8, stream: net.Stream) void {
+    const tokens = auth.refreshTokens(self.config, refresh_token) catch |err| {
+        switch (err) {
+            error.TokenNotFound => sendError(stream, .unauthorized, "invalid refresh token"),
+            error.TokenExpired => sendError(stream, .unauthorized, "refresh token expired"),
+            else => sendError(stream, .internal_server_error, "internal error"),
+        }
+        return;
+    };
+    defer self.config.allocator.free(tokens.id_token);
+
+    var body_buf: [2048]u8 = undefined;
+    const resp_body = std.fmt.bufPrint(&body_buf,
+        \\{{"id_token":"{s}","token_type":"Bearer","expires_in":{d},"refresh_token":"{s}"}}
+    , .{ tokens.id_token, tokens.expires_in, tokens.refresh_token }) catch {
+        sendError(stream, .internal_server_error, "internal error");
+        return;
+    };
+
+    sendJson(stream, .ok, resp_body);
+}
+
+// --- Userinfo ---
+
+fn handleUserinfo(self: *Server, headers: []const u8, stream: net.Stream) void {
+    const account_id = self.authenticate(headers) catch {
+        sendError(stream, .unauthorized, "unauthorized");
+        return;
+    };
+
+    var body_buf: [128]u8 = undefined;
+    const resp_body = std.fmt.bufPrint(&body_buf,
+        \\{{"sub":"{s}"}}
+    , .{account_id}) catch {
+        sendError(stream, .internal_server_error, "internal error");
+        return;
+    };
+
+    sendJson(stream, .ok, resp_body);
+}
+
+// --- Device Auth Handlers ---
 
 fn handleRegister(self: *Server, body: []const u8, stream: net.Stream) void {
     const req = parseJson(struct { public_key: []const u8, device_name: []const u8 }, body) catch {
@@ -85,16 +191,17 @@ fn handleRegister(self: *Server, body: []const u8, stream: net.Stream) void {
         }
         return;
     };
+    defer self.config.allocator.free(result.tokens.id_token);
 
-    var body_buf: [600]u8 = undefined;
+    var body_buf: [2048]u8 = undefined;
     const resp_body = std.fmt.bufPrint(&body_buf,
-        \\{{"account_id":"{s}","device_id":"{s}","access_token":"{s}","refresh_token":"{s}","expires_at":{d}}}
+        \\{{"account_id":"{s}","device_id":"{s}","id_token":"{s}","refresh_token":"{s}","expires_in":{d}}}
     , .{
         result.account_id,
         result.device_id,
-        result.tokens.access_token,
+        result.tokens.id_token,
         result.tokens.refresh_token,
-        result.tokens.expires_at,
+        result.tokens.expires_in,
     }) catch {
         sendError(stream, .internal_server_error, "internal error");
         return;
@@ -147,42 +254,17 @@ fn handleLogin(self: *Server, body: []const u8, stream: net.Stream) void {
         }
         return;
     };
+    defer self.config.allocator.free(result.tokens.id_token);
 
-    var body_buf: [600]u8 = undefined;
+    var body_buf: [2048]u8 = undefined;
     const resp_body = std.fmt.bufPrint(&body_buf,
-        \\{{"account_id":"{s}","access_token":"{s}","refresh_token":"{s}","expires_at":{d}}}
+        \\{{"account_id":"{s}","id_token":"{s}","refresh_token":"{s}","expires_in":{d}}}
     , .{
         result.account_id,
-        result.tokens.access_token,
+        result.tokens.id_token,
         result.tokens.refresh_token,
-        result.tokens.expires_at,
+        result.tokens.expires_in,
     }) catch {
-        sendError(stream, .internal_server_error, "internal error");
-        return;
-    };
-
-    sendJson(stream, .ok, resp_body);
-}
-
-fn handleRefresh(self: *Server, body: []const u8, stream: net.Stream) void {
-    const req = parseJson(struct { refresh_token: []const u8 }, body) catch {
-        sendError(stream, .bad_request, "invalid request body");
-        return;
-    };
-
-    const tokens = auth.refreshTokens(self.config, req.refresh_token) catch |err| {
-        switch (err) {
-            error.TokenNotFound => sendError(stream, .unauthorized, "invalid refresh token"),
-            error.TokenExpired => sendError(stream, .unauthorized, "refresh token expired"),
-            else => sendError(stream, .internal_server_error, "internal error"),
-        }
-        return;
-    };
-
-    var body_buf: [400]u8 = undefined;
-    const resp_body = std.fmt.bufPrint(&body_buf,
-        \\{{"access_token":"{s}","refresh_token":"{s}","expires_at":{d}}}
-    , .{ tokens.access_token, tokens.refresh_token, tokens.expires_at }) catch {
         sendError(stream, .internal_server_error, "internal error");
         return;
     };
@@ -239,7 +321,6 @@ fn handleUnlinkDevice(self: *Server, headers: []const u8, body: []const u8, stre
     auth.unlinkDevice(self.config, &account_id, req.device_id) catch |err| {
         switch (err) {
             error.DeviceNotFound => sendError(stream, .not_found, "device not found"),
-
             error.CannotRemoveLastDevice => sendError(stream, .bad_request, "cannot remove last device"),
             error.AccountNotFound => sendError(stream, .not_found, "account not found"),
             else => sendError(stream, .internal_server_error, "internal error"),
@@ -343,6 +424,18 @@ fn extractBearerToken(headers: []const u8) ?[]const u8 {
     return null;
 }
 
+fn getFormParam(body: []const u8, key: []const u8) ?[]const u8 {
+    var pairs = std.mem.splitScalar(u8, body, '&');
+    while (pairs.next()) |pair| {
+        if (std.mem.indexOfScalar(u8, pair, '=')) |eq_pos| {
+            if (std.mem.eql(u8, pair[0..eq_pos], key)) {
+                return pair[eq_pos + 1 ..];
+            }
+        }
+    }
+    return null;
+}
+
 fn asciiStartsWithIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (haystack.len < needle.len) return false;
     for (haystack[0..needle.len], needle) |h, n| {
@@ -381,4 +474,11 @@ test "extractBearerToken missing" {
 test "parseContentLength" {
     const headers = "Host: localhost\r\nContent-Length: 42\r\nAccept: */*";
     try std.testing.expectEqual(@as(usize, 42), parseContentLength(headers));
+}
+
+test "getFormParam" {
+    const body = "grant_type=refresh_token&refresh_token=abc123";
+    try std.testing.expectEqualStrings("refresh_token", getFormParam(body, "grant_type").?);
+    try std.testing.expectEqualStrings("abc123", getFormParam(body, "refresh_token").?);
+    try std.testing.expect(getFormParam(body, "missing") == null);
 }
