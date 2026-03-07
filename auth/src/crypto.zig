@@ -145,13 +145,10 @@ pub const JwtClaims = struct {
 };
 
 pub const JwtParseResult = struct {
-    allocator: Allocator,
-    claims: JwtClaims,
-    // Raw decoded payload JSON — claims point into this
-    payload_data: []const u8,
+    claims: std.json.Parsed(JwtClaims),
 
     pub fn deinit(self: *JwtParseResult) void {
-        self.allocator.free(self.payload_data);
+        self.claims.deinit();
     }
 };
 
@@ -182,20 +179,20 @@ pub fn verifyJwt(
     const payload_b64 = rest[0..second_dot];
     const payload_len = b64url.Decoder.calcSizeForSlice(payload_b64) catch return error.InvalidJwt;
     const payload_data = try allocator.alloc(u8, payload_len);
-    errdefer allocator.free(payload_data);
+    defer allocator.free(payload_data);
     b64url.Decoder.decode(payload_data, payload_b64) catch return error.InvalidJwt;
 
-    // Parse claims
-    const parsed = std.json.parseFromSlice(JwtClaims, allocator, payload_data, .{}) catch return error.InvalidJwt;
-    defer parsed.deinit();
+    // Parse claims (.alloc_always so strings are arena-owned, not referencing payload_data)
+    const parsed = std.json.parseFromSlice(JwtClaims, allocator, payload_data, .{
+        .allocate = .alloc_always,
+    }) catch return error.InvalidJwt;
+    errdefer parsed.deinit();
 
     // Check expiry
     if (parsed.value.exp <= timestamp()) return error.TokenExpired;
 
     return .{
-        .allocator = allocator,
-        .claims = parsed.value,
-        .payload_data = payload_data,
+        .claims = parsed,
     };
 }
 
@@ -269,10 +266,10 @@ test "createJwt and verifyJwt roundtrip" {
     var result = try verifyJwt(allocator, kp.public_key, jwt);
     defer result.deinit();
 
-    try std.testing.expectEqualStrings(&account_id, result.claims.sub);
-    try std.testing.expectEqualStrings("https://auth.example.com", result.claims.iss);
-    try std.testing.expectEqual(now, result.claims.iat);
-    try std.testing.expectEqual(now + 3600, result.claims.exp);
+    try std.testing.expectEqualStrings(&account_id, result.claims.value.sub);
+    try std.testing.expectEqualStrings("https://auth.example.com", result.claims.value.iss);
+    try std.testing.expectEqual(now, result.claims.value.iat);
+    try std.testing.expectEqual(now + 3600, result.claims.value.exp);
 }
 
 test "verifyJwt rejects wrong key" {

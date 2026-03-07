@@ -274,8 +274,8 @@ pub fn validateToken(config: Config, token: []const u8) !?[crypto.uuid_len]u8 {
         return null;
     defer result.deinit();
 
-    if (result.claims.sub.len != crypto.uuid_len) return null;
-    return result.claims.sub[0..crypto.uuid_len].*;
+    if (result.claims.value.sub.len != crypto.uuid_len) return null;
+    return result.claims.value.sub[0..crypto.uuid_len].*;
 }
 
 /// Refresh tokens using a compound refresh token.
@@ -497,7 +497,7 @@ test "register creates account and returns JWT" {
     // Should be verifiable
     var jwt_result = try crypto.verifyJwt(allocator, config.key_pair.public_key, result.tokens.id_token);
     defer jwt_result.deinit();
-    try std.testing.expectEqualStrings(&result.account_id, jwt_result.claims.sub);
+    try std.testing.expectEqualStrings(&result.account_id, jwt_result.claims.value.sub);
 }
 
 test "register rejects duplicate public key" {
@@ -544,7 +544,7 @@ test "challenge-login flow with JWT" {
     // Verify JWT
     var jwt_result = try crypto.verifyJwt(allocator, config.key_pair.public_key, login_result.tokens.id_token);
     defer jwt_result.deinit();
-    try std.testing.expectEqualStrings(&login_result.account_id, jwt_result.claims.sub);
+    try std.testing.expectEqualStrings(&login_result.account_id, jwt_result.claims.value.sub);
 }
 
 test "login rejects bad signature" {
