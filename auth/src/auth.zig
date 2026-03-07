@@ -1,5 +1,5 @@
 const std = @import("std");
-const Store = @import("Store.zig");
+const crypto = @import("crypto.zig");
 const persist = @import("persist.zig");
 const json = @import("json.zig");
 const Ed25519 = std.crypto.sign.Ed25519;
@@ -31,47 +31,47 @@ pub const Config = struct {
 };
 
 pub const TokenPair = struct {
-    access_token: [Store.compound_token_len]u8,
-    refresh_token: [Store.compound_token_len]u8,
+    access_token: [crypto.compound_token_len]u8,
+    refresh_token: [crypto.compound_token_len]u8,
     expires_at: i64,
 };
 
 pub const RegisterResult = struct {
-    account_id: [Store.uuid_len]u8,
-    device_id: [Store.uuid_len]u8,
+    account_id: [crypto.uuid_len]u8,
+    device_id: [crypto.uuid_len]u8,
     tokens: TokenPair,
 };
 
 pub const LoginResult = struct {
-    account_id: [Store.uuid_len]u8,
+    account_id: [crypto.uuid_len]u8,
     tokens: TokenPair,
 };
 
 pub const ChallengeResult = struct {
-    challenge: [Store.token_len]u8,
+    challenge: [crypto.token_len]u8,
     expires_at: i64,
 };
 
 pub const AccountInfo = struct {
-    account_id: [Store.uuid_len]u8,
+    account_id: [crypto.uuid_len]u8,
     created_at: i64,
     devices: []const DeviceInfo,
 };
 
 pub const DeviceInfo = struct {
-    id: [Store.uuid_len]u8,
+    id: [crypto.uuid_len]u8,
     name: []const u8,
     created_at: i64,
 };
 
 /// Register a new account with the given device public key.
 pub fn register(config: Config, public_key_hex: []const u8, device_name: []const u8) !RegisterResult {
-    if (public_key_hex.len != Store.key_len) return AuthError.InvalidPublicKey;
-    _ = Store.hexDecode(32, public_key_hex[0..Store.key_len]) catch return AuthError.InvalidPublicKey;
+    if (public_key_hex.len != crypto.key_len) return AuthError.InvalidPublicKey;
+    _ = crypto.hexDecode(32, public_key_hex[0..crypto.key_len]) catch return AuthError.InvalidPublicKey;
 
-    const now = Store.timestamp();
-    const account_id = Store.generateUuid();
-    const device_id = Store.generateUuid();
+    const now = crypto.timestamp();
+    const account_id = crypto.generateUuid();
+    const device_id = crypto.generateUuid();
 
     // Atomic duplicate check via key index
     persist.writeKeyIndex(config.allocator, config.base_dir, public_key_hex, &account_id) catch |err| switch (err) {
@@ -80,12 +80,12 @@ pub fn register(config: Config, public_key_hex: []const u8, device_name: []const
     };
     errdefer persist.removeKeyIndex(config.allocator, config.base_dir, public_key_hex) catch {};
 
-    const access_compound = Store.makeCompoundToken(&account_id);
-    const refresh_compound = Store.makeCompoundToken(&account_id);
+    const access_compound = crypto.makeCompoundToken(&account_id);
+    const refresh_compound = crypto.makeCompoundToken(&account_id);
 
     // Extract the token parts (64-char random portion) for storage
-    const access_parts = Store.parseCompoundToken(&access_compound).?;
-    const refresh_parts = Store.parseCompoundToken(&refresh_compound).?;
+    const access_parts = crypto.parseCompoundToken(&access_compound).?;
+    const refresh_parts = crypto.parseCompoundToken(&refresh_compound).?;
 
     const devices = [_]json.DeviceJson{.{
         .id = &device_id,
@@ -130,7 +130,7 @@ pub fn register(config: Config, public_key_hex: []const u8, device_name: []const
 
 /// Create a challenge for the device identified by the given public key.
 pub fn createChallenge(config: Config, public_key_hex: []const u8) !ChallengeResult {
-    if (public_key_hex.len != Store.key_len) return AuthError.InvalidPublicKey;
+    if (public_key_hex.len != crypto.key_len) return AuthError.InvalidPublicKey;
 
     const account_id = (try persist.readKeyIndex(config.allocator, config.base_dir, public_key_hex)) orelse
         return AuthError.DeviceNotFound;
@@ -144,10 +144,10 @@ pub fn createChallenge(config: Config, public_key_hex: []const u8) !ChallengeRes
         return AuthError.DeviceNotFound;
     };
 
-    const now = Store.timestamp();
+    const now = crypto.timestamp();
     var nonce: [32]u8 = undefined;
     std.crypto.random.bytes(&nonce);
-    const nonce_hex = Store.hexEncode(32, &nonce);
+    const nonce_hex = crypto.hexEncode(32, &nonce);
 
     // Build new challenges list: existing (pruned) + new
     var challenges = std.ArrayListUnmanaged(json.ChallengeJson){};
@@ -190,13 +190,13 @@ pub fn createChallenge(config: Config, public_key_hex: []const u8) !ChallengeRes
 
 /// Verify a login challenge signature and create a session.
 pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const u8, signature_hex: []const u8) !LoginResult {
-    if (public_key_hex.len != Store.key_len) return AuthError.InvalidPublicKey;
-    if (challenge_hex.len != Store.token_len) return AuthError.InvalidChallenge;
-    if (signature_hex.len != Store.sig_len) return AuthError.InvalidSignature;
+    if (public_key_hex.len != crypto.key_len) return AuthError.InvalidPublicKey;
+    if (challenge_hex.len != crypto.token_len) return AuthError.InvalidChallenge;
+    if (signature_hex.len != crypto.sig_len) return AuthError.InvalidSignature;
 
-    const pk_bytes = Store.hexDecode(32, public_key_hex[0..Store.key_len]) catch return AuthError.InvalidPublicKey;
-    const sig_bytes = Store.hexDecode(64, signature_hex[0..Store.sig_len]) catch return AuthError.InvalidSignature;
-    const challenge_bytes = Store.hexDecode(32, challenge_hex[0..Store.token_len]) catch return AuthError.InvalidChallenge;
+    const pk_bytes = crypto.hexDecode(32, public_key_hex[0..crypto.key_len]) catch return AuthError.InvalidPublicKey;
+    const sig_bytes = crypto.hexDecode(64, signature_hex[0..crypto.sig_len]) catch return AuthError.InvalidSignature;
+    const challenge_bytes = crypto.hexDecode(32, challenge_hex[0..crypto.token_len]) catch return AuthError.InvalidChallenge;
 
     // Verify Ed25519 signature
     const public_key = Ed25519.PublicKey.fromBytes(pk_bytes) catch return AuthError.InvalidPublicKey;
@@ -209,10 +209,10 @@ pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const 
     var locked = (try persist.openAndLockAccount(config.allocator, config.base_dir, &account_id)) orelse
         return AuthError.DeviceNotFound;
 
-    const now = Store.timestamp();
+    const now = crypto.timestamp();
 
     // Find and consume the challenge
-    var found_device_id: ?[Store.uuid_len]u8 = null;
+    var found_device_id: ?[crypto.uuid_len]u8 = null;
     var challenges = std.ArrayListUnmanaged(json.ChallengeJson){};
     defer challenges.deinit(config.allocator);
 
@@ -222,7 +222,7 @@ pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const 
                 locked.deinit();
                 return AuthError.ChallengeExpired;
             }
-            found_device_id = ch.device_id[0..Store.uuid_len].*;
+            found_device_id = ch.device_id[0..crypto.uuid_len].*;
             // Don't add to new list (consumed)
         } else if (ch.expires_at > now) {
             try challenges.append(config.allocator, ch);
@@ -235,10 +235,10 @@ pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const 
     }
 
     const device_id = found_device_id.?;
-    const access_compound = Store.makeCompoundToken(&account_id);
-    const refresh_compound = Store.makeCompoundToken(&account_id);
-    const access_parts = Store.parseCompoundToken(&access_compound).?;
-    const refresh_parts = Store.parseCompoundToken(&refresh_compound).?;
+    const access_compound = crypto.makeCompoundToken(&account_id);
+    const refresh_compound = crypto.makeCompoundToken(&account_id);
+    const access_parts = crypto.parseCompoundToken(&access_compound).?;
+    const refresh_parts = crypto.parseCompoundToken(&refresh_compound).?;
 
     // Build new sessions and refresh tokens lists
     var sessions = std.ArrayListUnmanaged(json.SessionJson){};
@@ -294,14 +294,14 @@ pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const 
 }
 
 /// Validate a compound access token. Returns the account_id.
-pub fn validateToken(config: Config, token: []const u8) !?[Store.uuid_len]u8 {
-    const parts = Store.parseCompoundToken(token) orelse return AuthError.TokenNotFound;
+pub fn validateToken(config: Config, token: []const u8) !?[crypto.uuid_len]u8 {
+    const parts = crypto.parseCompoundToken(token) orelse return AuthError.TokenNotFound;
 
     var locked = (try persist.openAndLockAccount(config.allocator, config.base_dir, &parts.account_id)) orelse
         return AuthError.TokenNotFound;
     defer locked.deinit();
 
-    const now = Store.timestamp();
+    const now = crypto.timestamp();
     for (locked.data.value.sessions) |s| {
         if (std.mem.eql(u8, s.token, &parts.token_part)) {
             if (s.expires_at <= now) return AuthError.TokenExpired;
@@ -313,12 +313,12 @@ pub fn validateToken(config: Config, token: []const u8) !?[Store.uuid_len]u8 {
 
 /// Refresh tokens using a compound refresh token.
 pub fn refreshTokens(config: Config, refresh_token: []const u8) !TokenPair {
-    const parts = Store.parseCompoundToken(refresh_token) orelse return AuthError.TokenNotFound;
+    const parts = crypto.parseCompoundToken(refresh_token) orelse return AuthError.TokenNotFound;
 
     var locked = (try persist.openAndLockAccount(config.allocator, config.base_dir, &parts.account_id)) orelse
         return AuthError.TokenNotFound;
 
-    const now = Store.timestamp();
+    const now = crypto.timestamp();
 
     // Find and consume the refresh token
     var found_device_id: ?[]const u8 = null;
@@ -352,10 +352,10 @@ pub fn refreshTokens(config: Config, refresh_token: []const u8) !TokenPair {
         if (s.expires_at > now) try sessions.append(config.allocator, s);
     }
 
-    const access_compound = Store.makeCompoundToken(&parts.account_id);
-    const refresh_compound = Store.makeCompoundToken(&parts.account_id);
-    const access_parts = Store.parseCompoundToken(&access_compound).?;
-    const refresh_parts = Store.parseCompoundToken(&refresh_compound).?;
+    const access_compound = crypto.makeCompoundToken(&parts.account_id);
+    const refresh_compound = crypto.makeCompoundToken(&parts.account_id);
+    const access_parts = crypto.parseCompoundToken(&access_compound).?;
+    const refresh_parts = crypto.parseCompoundToken(&refresh_compound).?;
 
     const at_owned = try config.allocator.dupe(u8, &access_parts.token_part);
     defer config.allocator.free(at_owned);
@@ -398,9 +398,9 @@ pub fn refreshTokens(config: Config, refresh_token: []const u8) !TokenPair {
 }
 
 /// Link a new device to an existing account.
-pub fn linkDevice(config: Config, account_id: *const [Store.uuid_len]u8, public_key_hex: []const u8, device_name: []const u8) !?[Store.uuid_len]u8 {
-    if (public_key_hex.len != Store.key_len) return AuthError.InvalidPublicKey;
-    _ = Store.hexDecode(32, public_key_hex[0..Store.key_len]) catch return AuthError.InvalidPublicKey;
+pub fn linkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, public_key_hex: []const u8, device_name: []const u8) !?[crypto.uuid_len]u8 {
+    if (public_key_hex.len != crypto.key_len) return AuthError.InvalidPublicKey;
+    _ = crypto.hexDecode(32, public_key_hex[0..crypto.key_len]) catch return AuthError.InvalidPublicKey;
 
     var locked = (try persist.openAndLockAccount(config.allocator, config.base_dir, account_id)) orelse
         return AuthError.AccountNotFound;
@@ -417,8 +417,8 @@ pub fn linkDevice(config: Config, account_id: *const [Store.uuid_len]u8, public_
         },
     };
 
-    const device_id = Store.generateUuid();
-    const now = Store.timestamp();
+    const device_id = crypto.generateUuid();
+    const now = crypto.timestamp();
 
     // Build new devices list
     var devices = std.ArrayListUnmanaged(json.DeviceJson){};
@@ -458,8 +458,8 @@ pub fn linkDevice(config: Config, account_id: *const [Store.uuid_len]u8, public_
 }
 
 /// Unlink a device from an account.
-pub fn unlinkDevice(config: Config, account_id: *const [Store.uuid_len]u8, device_id_hex: []const u8) !void {
-    if (device_id_hex.len != Store.uuid_len) return AuthError.DeviceNotFound;
+pub fn unlinkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, device_id_hex: []const u8) !void {
+    if (device_id_hex.len != crypto.uuid_len) return AuthError.DeviceNotFound;
 
     var locked = (try persist.openAndLockAccount(config.allocator, config.base_dir, account_id)) orelse
         return AuthError.AccountNotFound;
@@ -506,7 +506,7 @@ pub fn unlinkDevice(config: Config, account_id: *const [Store.uuid_len]u8, devic
 }
 
 /// Get account info including linked devices.
-pub fn getAccountInfo(config: Config, account_id: *const [Store.uuid_len]u8) !?AccountInfo {
+pub fn getAccountInfo(config: Config, account_id: *const [crypto.uuid_len]u8) !?AccountInfo {
     var locked = (try persist.openAndLockAccount(config.allocator, config.base_dir, account_id)) orelse
         return null;
     defer locked.deinit();
@@ -514,9 +514,9 @@ pub fn getAccountInfo(config: Config, account_id: *const [Store.uuid_len]u8) !?A
     var devices = try config.allocator.alloc(DeviceInfo, locked.data.value.devices.len);
     var count: usize = 0;
     for (locked.data.value.devices) |d| {
-        if (d.id.len >= Store.uuid_len) {
+        if (d.id.len >= crypto.uuid_len) {
             devices[count] = .{
-                .id = d.id[0..Store.uuid_len].*,
+                .id = d.id[0..crypto.uuid_len].*,
                 .name = try config.allocator.dupe(u8, d.name),
                 .created_at = d.created_at,
             };
@@ -525,9 +525,9 @@ pub fn getAccountInfo(config: Config, account_id: *const [Store.uuid_len]u8) !?A
     }
 
     const acc = locked.data.value.account;
-    var aid: [Store.uuid_len]u8 = undefined;
-    if (acc.id.len >= Store.uuid_len) {
-        @memcpy(&aid, acc.id[0..Store.uuid_len]);
+    var aid: [crypto.uuid_len]u8 = undefined;
+    if (acc.id.len >= crypto.uuid_len) {
+        @memcpy(&aid, acc.id[0..crypto.uuid_len]);
     }
 
     return .{
@@ -539,10 +539,10 @@ pub fn getAccountInfo(config: Config, account_id: *const [Store.uuid_len]u8) !?A
 
 // --- Internal ---
 
-fn findDeviceByKey(devices: []const json.DeviceJson, public_key_hex: []const u8) ?[Store.uuid_len]u8 {
+fn findDeviceByKey(devices: []const json.DeviceJson, public_key_hex: []const u8) ?[crypto.uuid_len]u8 {
     for (devices) |d| {
         if (std.mem.eql(u8, d.public_key, public_key_hex)) {
-            if (d.id.len >= Store.uuid_len) return d.id[0..Store.uuid_len].*;
+            if (d.id.len >= crypto.uuid_len) return d.id[0..crypto.uuid_len].*;
         }
     }
     return null;
@@ -572,14 +572,14 @@ test "register creates account and returns compound tokens" {
     const config = Config{ .allocator = allocator, .base_dir = base_dir };
 
     const kp = Ed25519.KeyPair.generate();
-    const pk_hex = Store.hexEncode(32, &kp.public_key.bytes);
+    const pk_hex = crypto.hexEncode(32, &kp.public_key.bytes);
 
     const result = try register(config, &pk_hex, "test device");
 
     // Compound tokens should be 101 chars with colon at position 36
-    try std.testing.expectEqual(@as(usize, Store.compound_token_len), result.tokens.access_token.len);
-    try std.testing.expectEqual(@as(u8, ':'), result.tokens.access_token[Store.uuid_len]);
-    try std.testing.expect(result.tokens.expires_at > Store.timestamp());
+    try std.testing.expectEqual(@as(usize, crypto.compound_token_len), result.tokens.access_token.len);
+    try std.testing.expectEqual(@as(u8, ':'), result.tokens.access_token[crypto.uuid_len]);
+    try std.testing.expect(result.tokens.expires_at > crypto.timestamp());
 
     // Key index should exist
     const read_id = try persist.readKeyIndex(allocator, base_dir, &pk_hex);
@@ -608,7 +608,7 @@ test "register rejects duplicate public key" {
     const config = Config{ .allocator = allocator, .base_dir = base_dir };
 
     const kp = Ed25519.KeyPair.generate();
-    const pk_hex = Store.hexEncode(32, &kp.public_key.bytes);
+    const pk_hex = crypto.hexEncode(32, &kp.public_key.bytes);
 
     _ = try register(config, &pk_hex, "device 1");
     const result = register(config, &pk_hex, "device 2");
@@ -636,7 +636,7 @@ test "challenge-login flow with compound tokens" {
     const config = Config{ .allocator = allocator, .base_dir = base_dir };
 
     const kp = Ed25519.KeyPair.generate();
-    const pk_hex = Store.hexEncode(32, &kp.public_key.bytes);
+    const pk_hex = crypto.hexEncode(32, &kp.public_key.bytes);
 
     _ = try register(config, &pk_hex, "test device");
 
@@ -644,14 +644,14 @@ test "challenge-login flow with compound tokens" {
     const challenge_result = try createChallenge(config, &pk_hex);
 
     // Sign the challenge nonce
-    const nonce = Store.hexDecode(32, &challenge_result.challenge) catch unreachable;
+    const nonce = crypto.hexDecode(32, &challenge_result.challenge) catch unreachable;
     const sig = try kp.sign(&nonce, null);
-    const sig_hex = Store.hexEncode(64, &sig.toBytes());
+    const sig_hex = crypto.hexEncode(64, &sig.toBytes());
 
     // Login
     const login_result = try login(config, &pk_hex, &challenge_result.challenge, &sig_hex);
-    try std.testing.expectEqual(@as(usize, Store.compound_token_len), login_result.tokens.access_token.len);
-    try std.testing.expect(login_result.tokens.expires_at > Store.timestamp());
+    try std.testing.expectEqual(@as(usize, crypto.compound_token_len), login_result.tokens.access_token.len);
+    try std.testing.expect(login_result.tokens.expires_at > crypto.timestamp());
 }
 
 test "login rejects bad signature" {
@@ -675,16 +675,16 @@ test "login rejects bad signature" {
     const config = Config{ .allocator = allocator, .base_dir = base_dir };
 
     const kp = Ed25519.KeyPair.generate();
-    const pk_hex = Store.hexEncode(32, &kp.public_key.bytes);
+    const pk_hex = crypto.hexEncode(32, &kp.public_key.bytes);
     _ = try register(config, &pk_hex, "test device");
 
     const challenge_result = try createChallenge(config, &pk_hex);
 
     // Sign with wrong key
     const bad_kp = Ed25519.KeyPair.generate();
-    const nonce = Store.hexDecode(32, &challenge_result.challenge) catch unreachable;
+    const nonce = crypto.hexDecode(32, &challenge_result.challenge) catch unreachable;
     const bad_sig = try bad_kp.sign(&nonce, null);
-    const bad_sig_hex = Store.hexEncode(64, &bad_sig.toBytes());
+    const bad_sig_hex = crypto.hexEncode(64, &bad_sig.toBytes());
 
     const result = login(config, &pk_hex, &challenge_result.challenge, &bad_sig_hex);
     try std.testing.expectError(AuthError.InvalidSignature, result);

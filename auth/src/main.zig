@@ -66,7 +66,7 @@ pub fn main() !void {
 
 // Pull in tests from all modules
 comptime {
-    _ = @import("Store.zig");
+    _ = @import("crypto.zig");
     _ = Server;
     _ = @import("auth.zig");
     _ = @import("json.zig");

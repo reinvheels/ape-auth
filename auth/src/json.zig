@@ -1,5 +1,5 @@
 const std = @import("std");
-const Store = @import("Store.zig");
+const crypto = @import("crypto.zig");
 const Allocator = std.mem.Allocator;
 
 // --- Request Parsing ---
@@ -188,7 +188,7 @@ test "serializeAccountData and parseAccountData roundtrip" {
         .created_at = 1000,
     }};
     const sessions = [_]SessionJson{.{
-        .token = "a" ** Store.token_len,
+        .token = "a" ** crypto.token_len,
         .device_id = device_id,
         .expires_at = 9999999999,
     }};

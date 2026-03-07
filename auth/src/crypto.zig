@@ -6,39 +6,6 @@ pub const key_len = 64; // 32 bytes hex-encoded
 pub const sig_len = 128; // 64 bytes hex-encoded
 pub const compound_token_len = uuid_len + 1 + token_len; // "uuid:token" = 101
 
-pub const Account = struct {
-    id: [uuid_len]u8,
-    created_at: i64,
-};
-
-pub const Device = struct {
-    id: [uuid_len]u8,
-    account_id: [uuid_len]u8,
-    public_key: [32]u8,
-    name: []const u8,
-    created_at: i64,
-};
-
-pub const Session = struct {
-    token: [token_len]u8,
-    account_id: [uuid_len]u8,
-    device_id: [uuid_len]u8,
-    expires_at: i64,
-};
-
-pub const RefreshToken = struct {
-    token: [token_len]u8,
-    account_id: [uuid_len]u8,
-    device_id: [uuid_len]u8,
-    expires_at: i64,
-};
-
-pub const Challenge = struct {
-    nonce: [32]u8,
-    device_id: [uuid_len]u8,
-    expires_at: i64,
-};
-
 // --- Helpers ---
 
 pub fn generateUuid() [uuid_len]u8 {

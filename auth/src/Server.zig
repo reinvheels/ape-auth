@@ -1,6 +1,6 @@
 const std = @import("std");
 const net = std.net;
-const Store = @import("Store.zig");
+const crypto = @import("crypto.zig");
 const auth = @import("auth.zig");
 const json = @import("json.zig");
 const Allocator = std.mem.Allocator;
@@ -294,7 +294,7 @@ fn handleGetAccount(self: *Server, headers: []const u8, stream: net.Stream) void
     sendJson(stream, .ok, w.buffered());
 }
 
-fn authenticate(self: *Server, headers: []const u8) auth.AuthError![Store.uuid_len]u8 {
+fn authenticate(self: *Server, headers: []const u8) auth.AuthError![crypto.uuid_len]u8 {
     const token = extractBearerToken(headers) orelse return auth.AuthError.Unauthorized;
     return (auth.validateToken(self.config, token) catch return auth.AuthError.Unauthorized) orelse return auth.AuthError.Unauthorized;
 }

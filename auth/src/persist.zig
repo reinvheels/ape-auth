@@ -1,5 +1,5 @@
 const std = @import("std");
-const Store = @import("Store.zig");
+const crypto = @import("crypto.zig");
 const json = @import("json.zig");
 const Allocator = std.mem.Allocator;
 
@@ -8,7 +8,7 @@ pub const LockedAccount = struct {
     lock_file: std.fs.File,
     data: std.json.Parsed(json.AccountData),
     file_data: []const u8, // raw JSON — parsed slices reference into this
-    account_id: [Store.uuid_len]u8,
+    account_id: [crypto.uuid_len]u8,
     base_dir: []const u8,
 
     pub fn deinit(self: *LockedAccount) void {
@@ -20,8 +20,8 @@ pub const LockedAccount = struct {
 
 /// Build the filesystem path for an account file.
 /// e.g. "a1b2c3d4-e5f6-7890-abcd-ef1234567890" -> "<base>/a1b2c3d4/e5f6/7890/abcd/ef1234567890.json"
-pub fn accountPath(allocator: Allocator, base_dir: []const u8, account_id: *const [Store.uuid_len]u8) ![]const u8 {
-    var sharded: [Store.uuid_len]u8 = account_id.*;
+pub fn accountPath(allocator: Allocator, base_dir: []const u8, account_id: *const [crypto.uuid_len]u8) ![]const u8 {
+    var sharded: [crypto.uuid_len]u8 = account_id.*;
     for (&sharded) |*c| {
         if (c.* == '-') c.* = '/';
     }
@@ -45,7 +45,7 @@ fn makeDirsRecursive(path: []const u8) !void {
 
 /// Open the lock file with exclusive flock, read and parse the account data.
 /// Returns null if the account file doesn't exist.
-pub fn openAndLockAccount(allocator: Allocator, base_dir: []const u8, account_id: *const [Store.uuid_len]u8) !?LockedAccount {
+pub fn openAndLockAccount(allocator: Allocator, base_dir: []const u8, account_id: *const [crypto.uuid_len]u8) !?LockedAccount {
     const path = try accountPath(allocator, base_dir, account_id);
     defer allocator.free(path);
 
@@ -124,7 +124,7 @@ pub fn writeAndUnlockAccount(allocator: Allocator, locked: *LockedAccount, new_d
 }
 
 /// Create a new account: create dirs, lock file, and data file.
-pub fn createAccountFile(allocator: Allocator, base_dir: []const u8, account_id: *const [Store.uuid_len]u8, data: json.AccountData) !void {
+pub fn createAccountFile(allocator: Allocator, base_dir: []const u8, account_id: *const [crypto.uuid_len]u8, data: json.AccountData) !void {
     const path = try accountPath(allocator, base_dir, account_id);
     defer allocator.free(path);
 
@@ -152,7 +152,7 @@ pub fn createAccountFile(allocator: Allocator, base_dir: []const u8, account_id:
 /// Create keys/<pk_hex> containing the account_id.
 /// Uses O_CREAT|O_EXCL for atomic race-safe duplicate detection.
 /// Returns error.DeviceAlreadyExists if the key file already exists.
-pub fn writeKeyIndex(allocator: Allocator, base_dir: []const u8, pk_hex: []const u8, account_id: *const [Store.uuid_len]u8) !void {
+pub fn writeKeyIndex(allocator: Allocator, base_dir: []const u8, pk_hex: []const u8, account_id: *const [crypto.uuid_len]u8) !void {
     const path = try std.fmt.allocPrint(allocator, "{s}/keys/{s}", .{ base_dir, pk_hex });
     defer allocator.free(path);
 
@@ -169,7 +169,7 @@ pub fn writeKeyIndex(allocator: Allocator, base_dir: []const u8, pk_hex: []const
 }
 
 /// Read keys/<pk_hex> to get the account_id.
-pub fn readKeyIndex(allocator: Allocator, base_dir: []const u8, pk_hex: []const u8) !?[Store.uuid_len]u8 {
+pub fn readKeyIndex(allocator: Allocator, base_dir: []const u8, pk_hex: []const u8) !?[crypto.uuid_len]u8 {
     const path = try std.fmt.allocPrint(allocator, "{s}/keys/{s}", .{ base_dir, pk_hex });
     defer allocator.free(path);
 
@@ -179,9 +179,9 @@ pub fn readKeyIndex(allocator: Allocator, base_dir: []const u8, pk_hex: []const 
     };
     defer file.close();
 
-    var buf: [Store.uuid_len]u8 = undefined;
+    var buf: [crypto.uuid_len]u8 = undefined;
     const n = try file.readAll(&buf);
-    if (n != Store.uuid_len) return null;
+    if (n != crypto.uuid_len) return null;
     return buf;
 }
 
