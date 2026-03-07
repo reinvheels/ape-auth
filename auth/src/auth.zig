@@ -8,8 +8,6 @@ const Allocator = std.mem.Allocator;
 const id_token_ttl: i64 = 3600; // 1 hour
 const refresh_token_ttl: i64 = 30 * 24 * 3600; // 30 days
 const challenge_ttl: i64 = 60; // 60 seconds
-const auth_code_ttl: i64 = 600; // 10 minutes
-
 pub const AuthError = error{
     InvalidPublicKey,
     InvalidSignature,
@@ -23,8 +21,6 @@ pub const AuthError = error{
     Unauthorized,
     CannotRemoveLastDevice,
     AccountNotFound,
-    InvalidAuthCode,
-    InvalidGrantType,
 };
 
 pub const Config = struct {
