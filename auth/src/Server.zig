@@ -56,36 +56,56 @@ pub fn handleConnection(self: *Server, conn: net.Server.Connection) void {
 }
 
 fn route(self: *Server, method: []const u8, path: []const u8, headers: []const u8, body: []const u8, stream: net.Stream) !void {
+    const is_get = std.mem.eql(u8, method, "GET");
+    const is_post = std.mem.eql(u8, method, "POST");
+
     // OIDC discovery
-    if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/.well-known/openid-configuration")) {
+    if (std.mem.eql(u8, path, "/.well-known/openid-configuration")) {
+        if (!is_get) return sendMethodNotAllowed(stream, "GET");
         self.handleDiscovery(stream);
-    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/.well-known/jwks.json")) {
+    } else if (std.mem.eql(u8, path, "/.well-known/jwks.json")) {
+        if (!is_get) return sendMethodNotAllowed(stream, "GET");
         self.handleJwks(stream);
     }
     // OIDC token + userinfo
-    else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/token")) {
+    else if (std.mem.eql(u8, path, "/token")) {
+        if (!is_post) return sendMethodNotAllowed(stream, "POST");
+        if (!hasContentType(headers, "application/x-www-form-urlencoded")) return sendError(stream, .bad_request, "expected content-type: application/x-www-form-urlencoded");
         self.handleToken(body, stream);
-    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/userinfo")) {
+    } else if (std.mem.eql(u8, path, "/userinfo")) {
+        if (!is_get) return sendMethodNotAllowed(stream, "GET");
         self.handleUserinfo(headers, stream);
     }
     // Device auth
-    else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/auth/register")) {
+    else if (std.mem.eql(u8, path, "/auth/register")) {
+        if (!is_post) return sendMethodNotAllowed(stream, "POST");
+        if (!hasContentType(headers, "application/json")) return sendError(stream, .bad_request, "expected content-type: application/json");
         self.handleRegister(body, stream);
-    } else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/auth/challenge")) {
+    } else if (std.mem.eql(u8, path, "/auth/challenge")) {
+        if (!is_post) return sendMethodNotAllowed(stream, "POST");
+        if (!hasContentType(headers, "application/json")) return sendError(stream, .bad_request, "expected content-type: application/json");
         self.handleChallenge(body, stream);
-    } else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/auth/login")) {
+    } else if (std.mem.eql(u8, path, "/auth/login")) {
+        if (!is_post) return sendMethodNotAllowed(stream, "POST");
+        if (!hasContentType(headers, "application/json")) return sendError(stream, .bad_request, "expected content-type: application/json");
         self.handleLogin(body, stream);
     }
     // Device management
-    else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/auth/devices/link")) {
+    else if (std.mem.eql(u8, path, "/auth/devices/link")) {
+        if (!is_post) return sendMethodNotAllowed(stream, "POST");
+        if (!hasContentType(headers, "application/json")) return sendError(stream, .bad_request, "expected content-type: application/json");
         self.handleLinkDevice(headers, body, stream);
-    } else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/auth/devices/unlink")) {
+    } else if (std.mem.eql(u8, path, "/auth/devices/unlink")) {
+        if (!is_post) return sendMethodNotAllowed(stream, "POST");
+        if (!hasContentType(headers, "application/json")) return sendError(stream, .bad_request, "expected content-type: application/json");
         self.handleUnlinkDevice(headers, body, stream);
-    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/auth/account")) {
+    } else if (std.mem.eql(u8, path, "/auth/account")) {
+        if (!is_get) return sendMethodNotAllowed(stream, "GET");
         self.handleGetAccount(headers, stream);
     }
     // Health
-    else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/health")) {
+    else if (std.mem.eql(u8, path, "/health")) {
+        if (!is_get) return sendMethodNotAllowed(stream, "GET");
         sendJson(stream, .ok, "{\"status\":\"ok\"}");
     } else {
         sendError(stream, .not_found, "not found");
@@ -390,6 +410,14 @@ fn sendJson(stream: net.Stream, status: std.http.Status, body: []const u8) void 
     stream.writeAll(response) catch {};
 }
 
+fn sendMethodNotAllowed(stream: net.Stream, allowed: []const u8) void {
+    var buf: [256]u8 = undefined;
+    const status_str = statusString(.method_not_allowed);
+    const body = "{\"error\":\"method not allowed\"}";
+    const response = std.fmt.bufPrint(&buf, "HTTP/1.1 {s}\r\nAllow: {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ status_str, allowed, body.len, body }) catch "";
+    stream.writeAll(response) catch {};
+}
+
 fn sendError(stream: net.Stream, status: std.http.Status, message: []const u8) void {
     var err_buf: [256]u8 = undefined;
     const err_body = std.fmt.bufPrint(&err_buf, "{{\"error\":\"{s}\"}}", .{message}) catch "{\"error\":\"internal error\"}";
@@ -409,11 +437,25 @@ fn statusString(status: std.http.Status) []const u8 {
         .ok => "200 OK",
         .bad_request => "400 Bad Request",
         .unauthorized => "401 Unauthorized",
+        .method_not_allowed => "405 Method Not Allowed",
         .not_found => "404 Not Found",
         .conflict => "409 Conflict",
         .internal_server_error => "500 Internal Server Error",
         else => "500 Internal Server Error",
     };
+}
+
+fn hasContentType(headers: []const u8, expected: []const u8) bool {
+    var lines = std.mem.splitSequence(u8, headers, "\r\n");
+    while (lines.next()) |line| {
+        if (asciiStartsWithIgnoreCase(line, "content-type:")) {
+            const value = std.mem.trim(u8, line["content-type:".len..], " ");
+            // Match before any ;params (e.g. "application/json; charset=utf-8")
+            const media_type = if (std.mem.indexOfScalar(u8, value, ';')) |i| std.mem.trim(u8, value[0..i], " ") else value;
+            return asciiStartsWithIgnoreCase(media_type, expected) and media_type.len == expected.len;
+        }
+    }
+    return false;
 }
 
 fn extractBearerToken(headers: []const u8) ?[]const u8 {
