@@ -410,13 +410,13 @@ pub fn unlinkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, devi
 
 /// Get account info including linked devices.
 pub fn getAccountInfo(config: Config, account_id: *const [crypto.uuid_len]u8) !?AccountInfo {
-    var locked = (try persist.openAndLockAccount(config.allocator, config.base_dir, account_id)) orelse
+    var parsed = (try persist.readAccount(config.allocator, config.base_dir, account_id)) orelse
         return null;
-    defer locked.deinit();
+    defer parsed.deinit();
 
-    var devices = try config.allocator.alloc(DeviceInfo, locked.data.value.devices.len);
+    var devices = try config.allocator.alloc(DeviceInfo, parsed.value.devices.len);
     var count: usize = 0;
-    for (locked.data.value.devices) |d| {
+    for (parsed.value.devices) |d| {
         if (d.id.len >= crypto.uuid_len) {
             devices[count] = .{
                 .id = d.id[0..crypto.uuid_len].*,
@@ -427,7 +427,7 @@ pub fn getAccountInfo(config: Config, account_id: *const [crypto.uuid_len]u8) !?
         }
     }
 
-    const acc = locked.data.value.account;
+    const acc = parsed.value.account;
     var aid: [crypto.uuid_len]u8 = undefined;
     if (acc.id.len >= crypto.uuid_len) {
         @memcpy(&aid, acc.id[0..crypto.uuid_len]);

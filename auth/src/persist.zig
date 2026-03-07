@@ -43,6 +43,29 @@ fn makeDirsRecursive(path: []const u8) !void {
     };
 }
 
+/// Read and parse account data without locking. For read-only access.
+/// Returns null if the account file doesn't exist.
+pub fn readAccount(allocator: Allocator, base_dir: []const u8, account_id: *const [crypto.uuid_len]u8) !?std.json.Parsed(schema.AccountData) {
+    const path = try accountPath(allocator, base_dir, account_id);
+    defer allocator.free(path);
+
+    const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer file.close();
+
+    const stat = try file.stat();
+    const file_data = try allocator.alloc(u8, stat.size);
+    defer allocator.free(file_data);
+
+    const n = try file.readAll(file_data);
+
+    return try std.json.parseFromSlice(schema.AccountData, allocator, file_data[0..n], .{
+        .allocate = .alloc_always,
+    });
+}
+
 /// Open the lock file with exclusive flock, read and parse the account data.
 /// Returns null if the account file doesn't exist.
 pub fn openAndLockAccount(allocator: Allocator, base_dir: []const u8, account_id: *const [crypto.uuid_len]u8) !?LockedAccount {
