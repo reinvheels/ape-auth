@@ -64,6 +64,7 @@ pub fn readAccount(allocator: Allocator, base_dir: []const u8, account_id: *cons
     return try std.json.parseFromSlice(schema.AccountData, allocator, file_data[0..n], .{
         .allocate = .alloc_always,
     });
+
 }
 
 /// Open the lock file with exclusive flock, read and parse the account data.
@@ -75,42 +76,29 @@ pub fn openAndLockAccount(allocator: Allocator, base_dir: []const u8, account_id
     const lock_path = try std.fmt.allocPrint(allocator, "{s}.lock", .{path});
     defer allocator.free(lock_path);
 
-    // Open lock file
     const lock_file = std.fs.openFileAbsolute(lock_path, .{ .mode = .read_write }) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
     errdefer lock_file.close();
 
-    // Acquire exclusive flock
-    lock_file.lock(.exclusive) catch |err| {
-        lock_file.close();
-        return err;
-    };
+    try lock_file.lock(.exclusive);
 
-    // Read the data file
     const data_file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
         error.FileNotFound => {
-            // Lock file exists but data file doesn't — shouldn't happen normally
             lock_file.close();
             return null;
         },
-        else => {
-            lock_file.close();
-            return err;
-        },
+        else => return err,
     };
     defer data_file.close();
 
     const stat = try data_file.stat();
     const file_data = try allocator.alloc(u8, stat.size);
+    errdefer allocator.free(file_data);
     const n = try data_file.readAll(file_data);
 
-    const parsed = schema.parse(allocator, file_data[0..n]) catch |err| {
-        allocator.free(file_data);
-        lock_file.close();
-        return err;
-    };
+    const parsed = try schema.parse(allocator, file_data[0..n]);
 
     return .{
         .allocator = allocator,
@@ -123,7 +111,7 @@ pub fn openAndLockAccount(allocator: Allocator, base_dir: []const u8, account_id
 }
 
 /// Write new data to the account file (atomic tmp+rename). Caller must deinit locked.
-pub fn writeAndUnlockAccount(allocator: Allocator, locked: *LockedAccount, new_data: schema.AccountData) !void {
+pub fn writeAccountData(allocator: Allocator, locked: *LockedAccount, new_data: schema.AccountData) !void {
     const path = try accountPath(allocator, locked.base_dir, &locked.account_id);
     defer allocator.free(path);
 
@@ -137,11 +125,7 @@ pub fn writeAndUnlockAccount(allocator: Allocator, locked: *LockedAccount, new_d
     try file.writeAll(serialized);
     file.close();
 
-    std.fs.renameAbsolute(tmp_path, path) catch {
-        const f2 = try std.fs.createFileAbsolute(path, .{});
-        try f2.writeAll(serialized);
-        f2.close();
-    };
+    try std.fs.renameAbsolute(tmp_path, path);
 }
 
 /// Create a new account: create dirs, lock file, and data file.

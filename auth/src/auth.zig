@@ -182,7 +182,7 @@ pub fn createChallenge(config: Config, public_key_hex: []const u8) !ChallengeRes
     var new_data = locked.data.value;
     new_data.challenges = challenges.items;
 
-    try persist.writeAndUnlockAccount(config.allocator, &locked, new_data);
+    try persist.writeAccountData(config.allocator, &locked, new_data);
 
     return .{
         .challenge = nonce_hex,
@@ -260,7 +260,7 @@ pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const 
     new_data.refresh_tokens = rts.items;
     new_data.challenges = challenges.items;
 
-    try persist.writeAndUnlockAccount(config.allocator, &locked, new_data);
+    try persist.writeAccountData(config.allocator, &locked, new_data);
 
     return .{
         .account_id = account_id,
@@ -323,7 +323,7 @@ pub fn refreshTokens(config: Config, refresh_token: []const u8) !TokenPair {
     var new_data = locked.data.value;
     new_data.refresh_tokens = rts.items;
 
-    try persist.writeAndUnlockAccount(config.allocator, &locked, new_data);
+    try persist.writeAccountData(config.allocator, &locked, new_data);
 
     return tokens;
 }
@@ -365,7 +365,7 @@ pub fn linkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, public
     var new_data = locked.data.value;
     new_data.devices = devices.items;
 
-    persist.writeAndUnlockAccount(config.allocator, &locked, new_data) catch |err| {
+    persist.writeAccountData(config.allocator, &locked, new_data) catch |err| {
         persist.removeKeyIndex(config.allocator, config.base_dir, public_key_hex) catch {};
         return err;
     };
@@ -400,7 +400,7 @@ pub fn unlinkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, devi
     var new_data = locked.data.value;
     new_data.devices = devices.items;
 
-    try persist.writeAndUnlockAccount(config.allocator, &locked, new_data);
+    try persist.writeAccountData(config.allocator, &locked, new_data);
 
     persist.removeKeyIndex(config.allocator, config.base_dir, removed_pk.?) catch {};
 }
