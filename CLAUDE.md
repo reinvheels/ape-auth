@@ -179,3 +179,4 @@ puc push prod     # push config to SSM
 - `infra/Pulumi.prod.yaml` — stack config (gitignored, managed via `puc`)
 - `docs/standards-assessment.md` — OAuth/OIDC standards comparison vs Ory Hydra (what we implement, what to add, what doesn't apply)
 - `docs/coding-conventions.md` — language-specific coding conventions
+- `plans/` — future work plans (API testing, etc.)
