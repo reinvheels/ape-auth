@@ -87,10 +87,6 @@ fn hexVal(c: u8) !u4 {
     };
 }
 
-pub fn timestamp() i64 {
-    return std.time.timestamp();
-}
-
 // --- Base64url ---
 
 const b64url = std.base64.url_safe_no_pad;
@@ -189,7 +185,7 @@ pub fn verifyJwt(
     errdefer parsed.deinit();
 
     // Check expiry
-    if (parsed.value.exp <= timestamp()) return error.TokenExpired;
+    if (parsed.value.exp <= std.time.timestamp()) return error.TokenExpired;
 
     return .{
         .claims = parsed,
@@ -250,7 +246,7 @@ test "createJwt and verifyJwt roundtrip" {
     const allocator = std.testing.allocator;
     const kp = Ed25519.KeyPair.generate();
     const account_id = generateUuid();
-    const now = timestamp();
+    const now = std.time.timestamp();
 
     const jwt = try createJwt(allocator, kp, "https://auth.example.com", &account_id, now, now + 3600);
     defer allocator.free(jwt);
@@ -277,7 +273,7 @@ test "verifyJwt rejects wrong key" {
     const kp = Ed25519.KeyPair.generate();
     const bad_kp = Ed25519.KeyPair.generate();
     const account_id = generateUuid();
-    const now = timestamp();
+    const now = std.time.timestamp();
 
     const jwt = try createJwt(allocator, kp, "https://auth.example.com", &account_id, now, now + 3600);
     defer allocator.free(jwt);
@@ -290,7 +286,7 @@ test "verifyJwt rejects expired token" {
     const allocator = std.testing.allocator;
     const kp = Ed25519.KeyPair.generate();
     const account_id = generateUuid();
-    const now = timestamp();
+    const now = std.time.timestamp();
 
     const jwt = try createJwt(allocator, kp, "https://auth.example.com", &account_id, now - 7200, now - 3600);
     defer allocator.free(jwt);

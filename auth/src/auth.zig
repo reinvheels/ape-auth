@@ -70,7 +70,7 @@ pub const DeviceInfo = struct {
 };
 
 fn makeTokenPair(config: Config, account_id: *const [crypto.uuid_len]u8) !TokenPair {
-    const now = crypto.timestamp();
+    const now = std.time.timestamp();
     const id_token = try crypto.createJwt(
         config.allocator,
         config.key_pair,
@@ -91,7 +91,7 @@ pub fn register(config: Config, public_key_hex: []const u8, device_name: []const
     if (public_key_hex.len != crypto.key_len) return AuthError.InvalidPublicKey;
     _ = crypto.hexDecode(32, public_key_hex[0..crypto.key_len]) catch return AuthError.InvalidPublicKey;
 
-    const now = crypto.timestamp();
+    const now = std.time.timestamp();
     const account_id = crypto.generateUuid();
     const device_id = crypto.generateUuid();
 
@@ -153,7 +153,7 @@ pub fn createChallenge(config: Config, public_key_hex: []const u8) !ChallengeRes
     const device_id = findDeviceByKey(locked.data.value.devices, public_key_hex) orelse
         return AuthError.DeviceNotFound;
 
-    const now = crypto.timestamp();
+    const now = std.time.timestamp();
     var nonce: [32]u8 = undefined;
     std.crypto.random.bytes(&nonce);
     const nonce_hex = crypto.hexEncode(32, &nonce);
@@ -212,7 +212,7 @@ pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const 
         return AuthError.DeviceNotFound;
     defer locked.deinit();
 
-    const now = crypto.timestamp();
+    const now = std.time.timestamp();
 
     // Find and consume the challenge
     var found_device_id: ?[crypto.uuid_len]u8 = null;
@@ -286,7 +286,7 @@ pub fn refreshTokens(config: Config, refresh_token: []const u8) !TokenPair {
         return AuthError.TokenNotFound;
     defer locked.deinit();
 
-    const now = crypto.timestamp();
+    const now = std.time.timestamp();
 
     // Find and consume the refresh token
     var found_device_id: ?[]const u8 = null;
@@ -344,7 +344,7 @@ pub fn linkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, public
     };
 
     const device_id = crypto.generateUuid();
-    const now = crypto.timestamp();
+    const now = std.time.timestamp();
 
     var devices = std.ArrayListUnmanaged(schema.Device){};
     defer devices.deinit(config.allocator);
