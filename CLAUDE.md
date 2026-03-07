@@ -27,7 +27,8 @@ All three entry points resolve the same question: which public key → which acc
 
 - **Ed25519 identity** — each account is a collection of public keys. Any key can prove the account's identity
 - **File-per-account persistence** — each account persisted to its own JSON file on mutation (atomic tmp+rename). UUID-based directory sharding
-- **JWT ID tokens** — Ed25519-signed JWTs (EdDSA), verified via JWKS. Short-lived (1h). Apps call `/userinfo` or verify locally via `/.well-known/jwks.json`
+- **JWT tokens** — Ed25519-signed JWTs (EdDSA). `/token` returns both `id_token` (client consumes for identity) and `access_token` (sent to app APIs as bearer token). Same JWT, different purpose. Verified via `/.well-known/jwks.json`
+- **App trust model** — the app and IDP trust each other. App API receives access tokens, verifies via JWKS, handles permissions on its own. For third-party apps: register scopes with IDP, or for fine-grained access control implement RFC 9396 (Rich Authorization Requests) where the resource server owns the consent screen
 - **Multi-device recovery** — users link additional devices; any linked device can restore access
 - **Runs in always-warm Lambda** — designed for Lambda + EFS, but runs standalone too
 
@@ -43,8 +44,8 @@ For web apps using Auth.js, Passport, or any OAuth client library.
 3. User's device signs challenge with Ed25519 keypair
 4. Ape Auth verifies signature, issues authorization code
 5. App exchanges code for tokens  POST /token  (back-channel)
-6. App calls  GET /userinfo  with access token to get user identity
-7. App creates its own session (e.g. Auth.js JWT), discards tokens
+6. Auth.js reads id_token for user identity, or calls  GET /userinfo  with access_token
+7. App creates its own session (e.g. Auth.js JWT)
 ```
 
 #### 2. CLI / programmatic clients — direct challenge-response over HTTP
@@ -54,9 +55,9 @@ For CLIs and API clients that don't need browser redirects.
 ```
 1. CLI has an Ed25519 keypair (registered or linked to account)
 2. POST /auth/challenge  →  server returns nonce
-3. CLI signs nonce  →  POST /auth/login  →  gets access token
-4. CLI sends token to app API in Authorization header
-5. App API calls  GET /userinfo  →  gets account_id
+3. CLI signs nonce  →  POST /auth/login  →  gets id_token + access_token (same JWT)
+4. CLI sends access_token to app API in Authorization header
+5. App API verifies JWT via JWKS  →  reads account_id from sub claim
 ```
 
 #### 3. SSH — key-based authentication
@@ -142,7 +143,7 @@ Device auth:
 - Server keypair: `server.key` (Ed25519 secret key for JWT signing, generated on first run)
 
 #### Token model:
-- **ID tokens** — Ed25519-signed JWTs (`{"sub":"<account_id>","iss":"...","iat":...,"exp":...}`). Short-lived (1h). Verified via JWKS or `/userinfo`.
+- **ID token + access token** — same Ed25519-signed JWT (`{"sub":"<account_id>","iss":"...","iat":...,"exp":...}`). Short-lived (1h). `id_token` is consumed by the client for identity. `access_token` is sent to app APIs as bearer token, verified via JWKS.
 - **Refresh tokens** — opaque compound tokens (`account_id:random_hex`), stored in account file, single-use (consumed and replaced). Long-lived (30d).
 
 ### Infrastructure (Pulumi / TypeScript)
