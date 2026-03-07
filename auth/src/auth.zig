@@ -1,3 +1,8 @@
+// TODO: Several functions dupe stack-allocated hex strings into heap copies just to
+// append to an ArrayList before serialization. If the JSON serializer doesn't require
+// heap-owned slices, these allocations (e.g. nonce_hex_owned, rt_owned, did_owned) can
+// be removed — the originals live on the stack for the entire serialize scope.
+
 const std = @import("std");
 const crypto = @import("crypto.zig");
 const persist = @import("persist.zig");
