@@ -2,7 +2,6 @@ const std = @import("std");
 const net = std.net;
 const crypto = @import("crypto.zig");
 const auth = @import("auth.zig");
-const json = @import("json.zig");
 const Allocator = std.mem.Allocator;
 
 const Server = @This();
@@ -73,7 +72,7 @@ fn route(self: *Server, method: []const u8, path: []const u8, headers: []const u
 }
 
 fn handleRegister(self: *Server, body: []const u8, stream: net.Stream) void {
-    const req = json.parseRegisterRequest(body) catch {
+    const req = parseJson(struct { public_key: []const u8, device_name: []const u8 }, body) catch {
         sendError(stream, .bad_request, "invalid request body");
         return;
     };
@@ -105,7 +104,7 @@ fn handleRegister(self: *Server, body: []const u8, stream: net.Stream) void {
 }
 
 fn handleChallenge(self: *Server, body: []const u8, stream: net.Stream) void {
-    const req = json.parseChallengeRequest(body) catch {
+    const req = parseJson(struct { public_key: []const u8 }, body) catch {
         sendError(stream, .bad_request, "invalid request body");
         return;
     };
@@ -131,7 +130,7 @@ fn handleChallenge(self: *Server, body: []const u8, stream: net.Stream) void {
 }
 
 fn handleLogin(self: *Server, body: []const u8, stream: net.Stream) void {
-    const req = json.parseLoginRequest(body) catch {
+    const req = parseJson(struct { public_key: []const u8, challenge: []const u8, signature: []const u8 }, body) catch {
         sendError(stream, .bad_request, "invalid request body");
         return;
     };
@@ -166,7 +165,7 @@ fn handleLogin(self: *Server, body: []const u8, stream: net.Stream) void {
 }
 
 fn handleRefresh(self: *Server, body: []const u8, stream: net.Stream) void {
-    const req = json.parseRefreshRequest(body) catch {
+    const req = parseJson(struct { refresh_token: []const u8 }, body) catch {
         sendError(stream, .bad_request, "invalid request body");
         return;
     };
@@ -197,7 +196,7 @@ fn handleLinkDevice(self: *Server, headers: []const u8, body: []const u8, stream
         return;
     };
 
-    const req = json.parseLinkDeviceRequest(body) catch {
+    const req = parseJson(struct { public_key: []const u8, device_name: []const u8 }, body) catch {
         sendError(stream, .bad_request, "invalid request body");
         return;
     };
@@ -232,7 +231,7 @@ fn handleUnlinkDevice(self: *Server, headers: []const u8, body: []const u8, stre
         return;
     };
 
-    const req = json.parseUnlinkDeviceRequest(body) catch {
+    const req = parseJson(struct { device_id: []const u8 }, body) catch {
         sendError(stream, .bad_request, "invalid request body");
         return;
     };
@@ -303,14 +302,32 @@ fn authenticate(self: *Server, headers: []const u8) auth.AuthError![crypto.uuid_
 
 fn sendJson(stream: net.Stream, status: std.http.Status, body: []const u8) void {
     var resp_buf: [8192]u8 = undefined;
-    const response = json.buildResponse(&resp_buf, status, body);
+    const status_str = statusString(status);
+    const response = std.fmt.bufPrint(&resp_buf, "HTTP/1.1 {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ status_str, body.len, body }) catch "";
     stream.writeAll(response) catch {};
 }
 
 fn sendError(stream: net.Stream, status: std.http.Status, message: []const u8) void {
     var err_buf: [256]u8 = undefined;
-    const err_body = json.buildErrorBody(&err_buf, message);
+    const err_body = std.fmt.bufPrint(&err_buf, "{{\"error\":\"{s}\"}}", .{message}) catch "{\"error\":\"internal error\"}";
     sendJson(stream, status, err_body);
+}
+
+fn parseJson(comptime T: type, body: []const u8) !T {
+    const parsed = try std.json.parseFromSlice(T, std.heap.page_allocator, body, .{});
+    return parsed.value;
+}
+
+fn statusString(status: std.http.Status) []const u8 {
+    return switch (status) {
+        .ok => "200 OK",
+        .bad_request => "400 Bad Request",
+        .unauthorized => "401 Unauthorized",
+        .not_found => "404 Not Found",
+        .conflict => "409 Conflict",
+        .internal_server_error => "500 Internal Server Error",
+        else => "500 Internal Server Error",
+    };
 }
 
 fn extractBearerToken(headers: []const u8) ?[]const u8 {

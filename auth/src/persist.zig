@@ -1,12 +1,12 @@
 const std = @import("std");
 const crypto = @import("crypto.zig");
-const json = @import("json.zig");
+const schema = @import("schema.zig");
 const Allocator = std.mem.Allocator;
 
 pub const LockedAccount = struct {
     allocator: Allocator,
     lock_file: std.fs.File,
-    data: std.json.Parsed(json.AccountData),
+    data: std.json.Parsed(schema.AccountData),
     file_data: []const u8, // raw JSON — parsed slices reference into this
     account_id: [crypto.uuid_len]u8,
     base_dir: []const u8,
@@ -83,7 +83,7 @@ pub fn openAndLockAccount(allocator: Allocator, base_dir: []const u8, account_id
     const file_data = try allocator.alloc(u8, stat.size);
     const n = try data_file.readAll(file_data);
 
-    const parsed = json.parseAccountData(allocator, file_data[0..n]) catch |err| {
+    const parsed = schema.parse(allocator, file_data[0..n]) catch |err| {
         allocator.free(file_data);
         lock_file.close();
         return err;
@@ -100,13 +100,13 @@ pub fn openAndLockAccount(allocator: Allocator, base_dir: []const u8, account_id
 }
 
 /// Write new data to the account file (atomic tmp+rename) and release the lock.
-pub fn writeAndUnlockAccount(allocator: Allocator, locked: *LockedAccount, new_data: json.AccountData) !void {
+pub fn writeAndUnlockAccount(allocator: Allocator, locked: *LockedAccount, new_data: schema.AccountData) !void {
     defer locked.deinit();
 
     const path = try accountPath(allocator, locked.base_dir, &locked.account_id);
     defer allocator.free(path);
 
-    const serialized = try json.serializeAccountData(allocator, new_data);
+    const serialized = try schema.serialize(allocator, new_data);
     defer allocator.free(serialized);
 
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
@@ -124,7 +124,7 @@ pub fn writeAndUnlockAccount(allocator: Allocator, locked: *LockedAccount, new_d
 }
 
 /// Create a new account: create dirs, lock file, and data file.
-pub fn createAccountFile(allocator: Allocator, base_dir: []const u8, account_id: *const [crypto.uuid_len]u8, data: json.AccountData) !void {
+pub fn createAccountFile(allocator: Allocator, base_dir: []const u8, account_id: *const [crypto.uuid_len]u8, data: schema.AccountData) !void {
     const path = try accountPath(allocator, base_dir, account_id);
     defer allocator.free(path);
 
@@ -139,7 +139,7 @@ pub fn createAccountFile(allocator: Allocator, base_dir: []const u8, account_id:
     lock_file.close();
 
     // Write data file
-    const serialized = try json.serializeAccountData(allocator, data);
+    const serialized = try schema.serialize(allocator, data);
     defer allocator.free(serialized);
 
     const file = try std.fs.createFileAbsolute(path, .{});
@@ -217,7 +217,7 @@ test "createAccountFile and openAndLockAccount roundtrip" {
     const device_id = "d1d2d3d4-d5d6-d7d8-d9da-dbdcdddedfee".*;
     const pk_hex: []const u8 = "ab" ** 32;
 
-    const devices = [_]json.DeviceJson{.{
+    const devices = [_]schema.DeviceJson{.{
         .id = &device_id,
         .account_id = &account_id,
         .public_key = pk_hex,
@@ -225,7 +225,7 @@ test "createAccountFile and openAndLockAccount roundtrip" {
         .created_at = 1000,
     }};
 
-    const data = json.AccountData{
+    const data = schema.AccountData{
         .account = .{ .id = &account_id, .created_at = 1000 },
         .devices = &devices,
         .sessions = &.{},

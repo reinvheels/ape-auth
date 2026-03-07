@@ -69,7 +69,7 @@ comptime {
     _ = @import("crypto.zig");
     _ = Server;
     _ = @import("auth.zig");
-    _ = @import("json.zig");
+    _ = @import("schema.zig");
     _ = @import("persist.zig");
 }
 

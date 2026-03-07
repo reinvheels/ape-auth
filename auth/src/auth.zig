@@ -1,7 +1,7 @@
 const std = @import("std");
 const crypto = @import("crypto.zig");
 const persist = @import("persist.zig");
-const json = @import("json.zig");
+const schema = @import("schema.zig");
 const Ed25519 = std.crypto.sign.Ed25519;
 const Allocator = std.mem.Allocator;
 
@@ -87,25 +87,25 @@ pub fn register(config: Config, public_key_hex: []const u8, device_name: []const
     const access_parts = crypto.parseCompoundToken(&access_compound).?;
     const refresh_parts = crypto.parseCompoundToken(&refresh_compound).?;
 
-    const devices = [_]json.DeviceJson{.{
+    const devices = [_]schema.DeviceJson{.{
         .id = &device_id,
         .account_id = &account_id,
         .public_key = public_key_hex,
         .name = device_name,
         .created_at = now,
     }};
-    const sessions = [_]json.SessionJson{.{
+    const sessions = [_]schema.SessionJson{.{
         .token = &access_parts.token_part,
         .device_id = &device_id,
         .expires_at = now + access_token_ttl,
     }};
-    const rts = [_]json.RefreshTokenJson{.{
+    const rts = [_]schema.RefreshTokenJson{.{
         .token = &refresh_parts.token_part,
         .device_id = &device_id,
         .expires_at = now + refresh_token_ttl,
     }};
 
-    const data = json.AccountData{
+    const data = schema.AccountData{
         .account = .{ .id = &account_id, .created_at = now },
         .devices = &devices,
         .sessions = &sessions,
@@ -150,7 +150,7 @@ pub fn createChallenge(config: Config, public_key_hex: []const u8) !ChallengeRes
     const nonce_hex = crypto.hexEncode(32, &nonce);
 
     // Build new challenges list: existing (pruned) + new
-    var challenges = std.ArrayListUnmanaged(json.ChallengeJson){};
+    var challenges = std.ArrayListUnmanaged(schema.ChallengeJson){};
     defer challenges.deinit(config.allocator);
 
     // Keep unexpired challenges
@@ -172,7 +172,7 @@ pub fn createChallenge(config: Config, public_key_hex: []const u8) !ChallengeRes
         .expires_at = now + challenge_ttl,
     });
 
-    const new_data = json.AccountData{
+    const new_data = schema.AccountData{
         .account = locked.data.value.account,
         .devices = locked.data.value.devices,
         .sessions = locked.data.value.sessions,
@@ -213,7 +213,7 @@ pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const 
 
     // Find and consume the challenge
     var found_device_id: ?[crypto.uuid_len]u8 = null;
-    var challenges = std.ArrayListUnmanaged(json.ChallengeJson){};
+    var challenges = std.ArrayListUnmanaged(schema.ChallengeJson){};
     defer challenges.deinit(config.allocator);
 
     for (locked.data.value.challenges) |ch| {
@@ -241,9 +241,9 @@ pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const 
     const refresh_parts = crypto.parseCompoundToken(&refresh_compound).?;
 
     // Build new sessions and refresh tokens lists
-    var sessions = std.ArrayListUnmanaged(json.SessionJson){};
+    var sessions = std.ArrayListUnmanaged(schema.SessionJson){};
     defer sessions.deinit(config.allocator);
-    var rts = std.ArrayListUnmanaged(json.RefreshTokenJson){};
+    var rts = std.ArrayListUnmanaged(schema.RefreshTokenJson){};
     defer rts.deinit(config.allocator);
 
     // Keep existing unexpired
@@ -273,7 +273,7 @@ pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const 
         .expires_at = now + refresh_token_ttl,
     });
 
-    const new_data = json.AccountData{
+    const new_data = schema.AccountData{
         .account = locked.data.value.account,
         .devices = locked.data.value.devices,
         .sessions = sessions.items,
@@ -322,9 +322,9 @@ pub fn refreshTokens(config: Config, refresh_token: []const u8) !TokenPair {
 
     // Find and consume the refresh token
     var found_device_id: ?[]const u8 = null;
-    var rts = std.ArrayListUnmanaged(json.RefreshTokenJson){};
+    var rts = std.ArrayListUnmanaged(schema.RefreshTokenJson){};
     defer rts.deinit(config.allocator);
-    var sessions = std.ArrayListUnmanaged(json.SessionJson){};
+    var sessions = std.ArrayListUnmanaged(schema.SessionJson){};
     defer sessions.deinit(config.allocator);
 
     for (locked.data.value.refresh_tokens) |r| {
@@ -374,13 +374,13 @@ pub fn refreshTokens(config: Config, refresh_token: []const u8) !TokenPair {
     });
 
     // Prune expired challenges
-    var challenges = std.ArrayListUnmanaged(json.ChallengeJson){};
+    var challenges = std.ArrayListUnmanaged(schema.ChallengeJson){};
     defer challenges.deinit(config.allocator);
     for (locked.data.value.challenges) |ch| {
         if (ch.expires_at > now) try challenges.append(config.allocator, ch);
     }
 
-    const new_data = json.AccountData{
+    const new_data = schema.AccountData{
         .account = locked.data.value.account,
         .devices = locked.data.value.devices,
         .sessions = sessions.items,
@@ -421,7 +421,7 @@ pub fn linkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, public
     const now = crypto.timestamp();
 
     // Build new devices list
-    var devices = std.ArrayListUnmanaged(json.DeviceJson){};
+    var devices = std.ArrayListUnmanaged(schema.DeviceJson){};
     defer devices.deinit(config.allocator);
     for (locked.data.value.devices) |d| {
         try devices.append(config.allocator, d);
@@ -440,7 +440,7 @@ pub fn linkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, public
         .created_at = now,
     });
 
-    const new_data = json.AccountData{
+    const new_data = schema.AccountData{
         .account = locked.data.value.account,
         .devices = devices.items,
         .sessions = locked.data.value.sessions,
@@ -470,7 +470,7 @@ pub fn unlinkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, devi
     }
 
     // Find the device and build new list without it
-    var devices = std.ArrayListUnmanaged(json.DeviceJson){};
+    var devices = std.ArrayListUnmanaged(schema.DeviceJson){};
     defer devices.deinit(config.allocator);
     var removed_pk: ?[]const u8 = null;
 
@@ -491,7 +491,7 @@ pub fn unlinkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, devi
         return AuthError.DeviceNotFound;
     }
 
-    const new_data = json.AccountData{
+    const new_data = schema.AccountData{
         .account = locked.data.value.account,
         .devices = devices.items,
         .sessions = locked.data.value.sessions,
@@ -539,7 +539,7 @@ pub fn getAccountInfo(config: Config, account_id: *const [crypto.uuid_len]u8) !?
 
 // --- Internal ---
 
-fn findDeviceByKey(devices: []const json.DeviceJson, public_key_hex: []const u8) ?[crypto.uuid_len]u8 {
+fn findDeviceByKey(devices: []const schema.DeviceJson, public_key_hex: []const u8) ?[crypto.uuid_len]u8 {
     for (devices) |d| {
         if (std.mem.eql(u8, d.public_key, public_key_hex)) {
             if (d.id.len >= crypto.uuid_len) return d.id[0..crypto.uuid_len].*;
