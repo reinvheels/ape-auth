@@ -10,8 +10,9 @@ COPY build.zig build.zig.zon ./
 COPY src/ src/
 RUN zig build -Dtarget=aarch64-linux -Doptimize=ReleaseSafe
 
-FROM public.ecr.aws/lambda/provided:al2023-arm64
+FROM alpine:3 AS runtime
+RUN mkdir -p /opt/extensions /tmp
 COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:1.0.0-rc1 /lambda-adapter /opt/extensions/lambda-adapter
 COPY --from=build /app/zig-out/bin/ape-auth /var/runtime/bootstrap
 ENV AWS_LWA_READINESS_CHECK_PATH=/health
-CMD ["bootstrap"]
+ENTRYPOINT ["/var/runtime/bootstrap"]
