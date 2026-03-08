@@ -154,8 +154,13 @@ fn handleToken(self: *Server, body: []const u8, w: *Io.Writer) void {
     };
 
     if (std.mem.eql(u8, grant_type, "refresh_token")) {
-        const refresh_token = getFormParam(body, "refresh_token") orelse {
+        const raw = getFormParam(body, "refresh_token") orelse {
             sendError(w, .bad_request, "missing refresh_token");
+            return;
+        };
+        var decoded_buf: [256]u8 = undefined;
+        const refresh_token = percentDecode(raw, &decoded_buf) orelse {
+            sendError(w, .bad_request, "invalid refresh_token encoding");
             return;
         };
         self.handleRefreshGrant(refresh_token, w);
@@ -495,6 +500,40 @@ fn getFormParam(body: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Decode percent-encoded bytes (e.g. %3A → ':') into a fixed buffer.
+/// Returns null if the output buffer is too small or encoding is malformed.
+fn percentDecode(input: []const u8, buf: []u8) ?[]const u8 {
+    var i: usize = 0;
+    var out: usize = 0;
+    while (i < input.len) {
+        if (out >= buf.len) return null;
+        if (input[i] == '%') {
+            if (i + 2 >= input.len) return null;
+            const hi = hexVal(input[i + 1]) orelse return null;
+            const lo = hexVal(input[i + 2]) orelse return null;
+            buf[out] = (@as(u8, hi) << 4) | lo;
+            i += 3;
+        } else if (input[i] == '+') {
+            buf[out] = ' ';
+            i += 1;
+        } else {
+            buf[out] = input[i];
+            i += 1;
+        }
+        out += 1;
+    }
+    return buf[0..out];
+}
+
+fn hexVal(c: u8) ?u4 {
+    return switch (c) {
+        '0'...'9' => @truncate(c - '0'),
+        'a'...'f' => @truncate(c - 'a' + 10),
+        'A'...'F' => @truncate(c - 'A' + 10),
+        else => null,
+    };
+}
+
 fn asciiStartsWithIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (haystack.len < needle.len) return false;
     for (haystack[0..needle.len], needle) |h, n| {
@@ -537,4 +576,12 @@ test "getFormParam" {
     try std.testing.expectEqualStrings("refresh_token", getFormParam(body, "grant_type").?);
     try std.testing.expectEqualStrings("abc123", getFormParam(body, "refresh_token").?);
     try std.testing.expect(getFormParam(body, "missing") == null);
+}
+
+test "percentDecode" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("abc:def", percentDecode("abc%3Adef", &buf).?);
+    try std.testing.expectEqualStrings("hello world", percentDecode("hello+world", &buf).?);
+    try std.testing.expectEqualStrings("noop", percentDecode("noop", &buf).?);
+    try std.testing.expect(percentDecode("%ZZ", &buf) == null); // invalid hex
 }

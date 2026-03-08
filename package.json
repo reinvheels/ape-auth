@@ -2,6 +2,7 @@
   "name": "ape-auth",
   "private": true,
   "workspaces": [
-    "infra"
+    "infra",
+    "api-tests"
   ]
 }

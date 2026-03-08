@@ -1,0 +1,12 @@
+{
+  "name": "ape-auth-api-tests",
+  "private": true,
+  "scripts": {
+    "test": "bun test",
+    "test:local": "BASE_URL=http://localhost:8080 bun test",
+    "test:prod": "BASE_URL=$(cd ../infra && pulumi stack output url --stack prod) bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}
