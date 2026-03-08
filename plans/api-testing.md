@@ -1,38 +1,10 @@
 # API Testing Plan
 
-## 1. Internal API integration tests
+## 1. Internal API integration tests ✓
 
-End-to-end tests that hit the HTTP server endpoints. Write as a shell script or Zig test binary against a running server instance.
+Implemented in `api-tests/` (bun workspace). 24 tests across 8 describe blocks. Run with `bun test` (local) or `bun run test:prod` (against prod).
 
-### Device auth flow
-
-- **Registration** — `POST /auth/register` → response has account_id, device_id, id_token, access_token, refresh_token
-- **Challenge-login** — register → `POST /auth/challenge` → sign nonce with Ed25519 → `POST /auth/login` → verify tokens
-- **Token refresh** — login → `POST /token` (grant_type=refresh_token) → verify new tokens, old refresh token invalidated (single-use)
-- **Device link/unlink** — authenticated `POST /auth/devices/link` → verify in `GET /auth/account` → unlink → verify removed → cannot unlink last device (400)
-- **Userinfo** — `GET /userinfo` with bearer token → verify `{"sub":"<account_id>"}`
-
-### OIDC endpoints
-
-- **Discovery** — `GET /.well-known/openid-configuration` → validate required fields (issuer, token_endpoint, jwks_uri, etc.)
-- **JWKS** — `GET /.well-known/jwks.json` → validate key format (kty=OKP, crv=Ed25519, alg=EdDSA), use key to verify a JWT from `/token`
-
-### Error cases
-
-- Wrong HTTP method → 405 with Allow header
-- Wrong Content-Type → 400
-- Invalid signature on login → 401
-- Expired challenge → 400
-- Expired/invalid refresh token → 401
-- Duplicate device registration → 409
-- Unlink last device → 400
-- Missing/invalid bearer token → 401
-
-### Request validation
-
-- Empty body on POST endpoints → 400
-- Malformed JSON → 400
-- Missing required fields → 400
+All planned cases covered: registration, challenge-login, token refresh (single-use), device link/unlink, userinfo, OIDC discovery, JWKS + JWT verification, error cases (405, 401, 409, 400, 404), request validation (empty body, malformed JSON).
 
 ## 2. OAuth/OIDC conformance (after authorization code flow is implemented)
 
