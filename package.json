@@ -1,4 +1,7 @@
 {
   "name": "ape-auth",
-  "private": true
+  "private": true,
+  "workspaces": [
+    "infra"
+  ]
 }
