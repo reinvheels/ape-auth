@@ -3,7 +3,23 @@ import * as aws from "@pulumi/aws";
 import * as docker_build from "@pulumi/docker-build";
 
 const config = new pulumi.Config("ape-auth");
-const issuer = config.require("issuer");
+const domainName = config.require("domainName");
+
+// Find Route53 hosted zone by recursively searching domain parts
+async function findHostedZone(domain: string): Promise<aws.route53.GetZoneResult> {
+  const parts = domain.split(".");
+  for (let i = 0; i < parts.length - 1; i++) {
+    const zoneName = parts.slice(i).join(".");
+    try {
+      return await aws.route53.getZone({ name: zoneName });
+    } catch {
+      continue;
+    }
+  }
+  throw new Error(`No Route53 hosted zone found for domain "${domain}"`);
+}
+
+const hostedZone = findHostedZone(domainName);
 
 const current = aws.getAvailabilityZones({ state: "available" });
 const az = current.then((azs) => azs.names[0]);
@@ -118,7 +134,7 @@ const fn = new aws.lambda.Function("ape-auth", {
     variables: {
       APE_AUTH_DATA_DIR: efsDataDir,
       APE_AUTH_PORT: "8080",
-      APE_AUTH_ISSUER: issuer,
+      APE_AUTH_ISSUER: `https://${domainName}`,
     },
   },
   vpcConfig: {
@@ -163,8 +179,57 @@ new aws.lambda.Permission("api-gw-permission", {
   sourceArn: pulumi.interpolate`${api.executionArn}/*/*`,
 });
 
+// --- Custom Domain (ACM + Route53) ---
+
+const cert = new aws.acm.Certificate("cert", {
+  domainName,
+  validationMethod: "DNS",
+});
+
+const certValidation = new aws.route53.Record("cert-validation", {
+  zoneId: pulumi.output(hostedZone).apply((z) => z.zoneId),
+  name: cert.domainValidationOptions[0].resourceRecordName,
+  type: cert.domainValidationOptions[0].resourceRecordType,
+  records: [cert.domainValidationOptions[0].resourceRecordValue],
+  ttl: 300,
+});
+
+const certWait = new aws.acm.CertificateValidation("cert-wait", {
+  certificateArn: cert.arn,
+  validationRecordFqdns: [certValidation.fqdn],
+});
+
+const customDomain = new aws.apigatewayv2.DomainName("custom-domain", {
+  domainName,
+  domainNameConfiguration: {
+    certificateArn: certWait.certificateArn,
+    endpointType: "REGIONAL",
+    securityPolicy: "TLS_1_2",
+  },
+});
+
+new aws.apigatewayv2.ApiMapping("api-mapping", {
+  apiId: api.id,
+  domainName: customDomain.domainName,
+  stage: stage.id,
+});
+
+new aws.route53.Record("api-dns", {
+  zoneId: pulumi.output(hostedZone).apply((z) => z.zoneId),
+  name: domainName,
+  type: "A",
+  aliases: [
+    {
+      name: customDomain.domainNameConfiguration.apply((c) => c.targetDomainName),
+      zoneId: customDomain.domainNameConfiguration.apply((c) => c.hostedZoneId),
+      evaluateTargetHealth: false,
+    },
+  ],
+});
+
 // --- Outputs ---
 
-export const apiUrl = api.apiEndpoint;
+export const url = `https://${domainName}`;
+export const apiEndpoint = api.apiEndpoint;
 export const fileSystemId = fs.id;
 export const vpcId = vpc.id;
