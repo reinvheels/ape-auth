@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Ed25519 = std.crypto.sign.Ed25519;
+const Io = std.Io;
 
 pub const uuid_len = 36; // 16 bytes hex-encoded with dashes (8-4-4-4-12)
 pub const token_len = 64; // 32 bytes hex-encoded
@@ -10,9 +11,9 @@ pub const compound_token_len = uuid_len + 1 + token_len; // "uuid:token" = 101
 
 // --- Helpers ---
 
-pub fn generateUuid() [uuid_len]u8 {
+pub fn generateUuid(io: Io) [uuid_len]u8 {
     var bytes: [16]u8 = undefined;
-    std.crypto.random.bytes(&bytes);
+    io.random(&bytes);
     const hex = hexEncode(16, &bytes);
     var out: [uuid_len]u8 = undefined;
     @memcpy(out[0..8], hex[0..8]);
@@ -27,18 +28,18 @@ pub fn generateUuid() [uuid_len]u8 {
     return out;
 }
 
-pub fn generateToken() [token_len]u8 {
+pub fn generateToken(io: Io) [token_len]u8 {
     var bytes: [32]u8 = undefined;
-    std.crypto.random.bytes(&bytes);
+    io.random(&bytes);
     return hexEncode(32, &bytes);
 }
 
 /// Create a compound token: "<account_id>:<random_hex>"
-pub fn makeCompoundToken(account_id: *const [uuid_len]u8) [compound_token_len]u8 {
+pub fn makeCompoundToken(account_id: *const [uuid_len]u8, io: Io) [compound_token_len]u8 {
     var out: [compound_token_len]u8 = undefined;
     @memcpy(out[0..uuid_len], account_id);
     out[uuid_len] = ':';
-    const token = generateToken();
+    const token = generateToken(io);
     @memcpy(out[uuid_len + 1 ..], &token);
     return out;
 }
@@ -153,6 +154,7 @@ pub fn verifyJwt(
     allocator: Allocator,
     public_key: Ed25519.PublicKey,
     token: []const u8,
+    io: Io,
 ) !JwtParseResult {
     // Split into header.payload.signature
     const first_dot = std.mem.indexOfScalar(u8, token, '.') orelse return error.InvalidJwt;
@@ -185,7 +187,8 @@ pub fn verifyJwt(
     errdefer parsed.deinit();
 
     // Check expiry
-    if (parsed.value.exp <= std.time.timestamp()) return error.TokenExpired;
+    const now: i64 = @intCast(@divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+    if (parsed.value.exp <= now) return error.TokenExpired;
 
     return .{
         .claims = parsed,
@@ -205,7 +208,7 @@ pub fn jwksJson(allocator: Allocator, public_key: Ed25519.PublicKey) ![]const u8
 // --- Tests ---
 
 test "generateUuid returns valid dashed hex" {
-    const uuid = generateUuid();
+    const uuid = generateUuid(std.testing.io);
     try std.testing.expectEqual(@as(u8, '-'), uuid[8]);
     try std.testing.expectEqual(@as(u8, '-'), uuid[13]);
     try std.testing.expectEqual(@as(u8, '-'), uuid[18]);
@@ -225,8 +228,8 @@ test "hexEncode/hexDecode roundtrip" {
 }
 
 test "makeCompoundToken and parseCompoundToken roundtrip" {
-    const account_id = generateUuid();
-    const compound = makeCompoundToken(&account_id);
+    const account_id = generateUuid(std.testing.io);
+    const compound = makeCompoundToken(&account_id, std.testing.io);
     try std.testing.expectEqual(@as(u8, ':'), compound[uuid_len]);
 
     const parts = parseCompoundToken(&compound);
@@ -244,9 +247,10 @@ test "parseCompoundToken rejects bad input" {
 
 test "createJwt and verifyJwt roundtrip" {
     const allocator = std.testing.allocator;
-    const kp = Ed25519.KeyPair.generate();
-    const account_id = generateUuid();
-    const now = std.time.timestamp();
+    const io = std.testing.io;
+    const kp = Ed25519.KeyPair.generate(io);
+    const account_id = generateUuid(io);
+    const now: i64 = @intCast(@divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
 
     const jwt = try createJwt(allocator, kp, "https://auth.example.com", &account_id, now, now + 3600);
     defer allocator.free(jwt);
@@ -259,7 +263,7 @@ test "createJwt and verifyJwt roundtrip" {
     try std.testing.expectEqual(@as(usize, 2), dots);
 
     // Verify
-    var result = try verifyJwt(allocator, kp.public_key, jwt);
+    var result = try verifyJwt(allocator, kp.public_key, jwt, io);
     defer result.deinit();
 
     try std.testing.expectEqualStrings(&account_id, result.claims.value.sub);
@@ -270,34 +274,37 @@ test "createJwt and verifyJwt roundtrip" {
 
 test "verifyJwt rejects wrong key" {
     const allocator = std.testing.allocator;
-    const kp = Ed25519.KeyPair.generate();
-    const bad_kp = Ed25519.KeyPair.generate();
-    const account_id = generateUuid();
-    const now = std.time.timestamp();
+    const io = std.testing.io;
+    const kp = Ed25519.KeyPair.generate(io);
+    const bad_kp = Ed25519.KeyPair.generate(io);
+    const account_id = generateUuid(io);
+    const now: i64 = @intCast(@divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
 
     const jwt = try createJwt(allocator, kp, "https://auth.example.com", &account_id, now, now + 3600);
     defer allocator.free(jwt);
 
-    const result = verifyJwt(allocator, bad_kp.public_key, jwt);
+    const result = verifyJwt(allocator, bad_kp.public_key, jwt, io);
     try std.testing.expectError(error.InvalidSignature, result);
 }
 
 test "verifyJwt rejects expired token" {
     const allocator = std.testing.allocator;
-    const kp = Ed25519.KeyPair.generate();
-    const account_id = generateUuid();
-    const now = std.time.timestamp();
+    const io = std.testing.io;
+    const kp = Ed25519.KeyPair.generate(io);
+    const account_id = generateUuid(io);
+    const now: i64 = @intCast(@divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
 
     const jwt = try createJwt(allocator, kp, "https://auth.example.com", &account_id, now - 7200, now - 3600);
     defer allocator.free(jwt);
 
-    const result = verifyJwt(allocator, kp.public_key, jwt);
+    const result = verifyJwt(allocator, kp.public_key, jwt, io);
     try std.testing.expectError(error.TokenExpired, result);
 }
 
 test "jwksJson produces valid JSON" {
     const allocator = std.testing.allocator;
-    const kp = Ed25519.KeyPair.generate();
+    const io = std.testing.io;
+    const kp = Ed25519.KeyPair.generate(io);
 
     const json = try jwksJson(allocator, kp.public_key);
     defer allocator.free(json);

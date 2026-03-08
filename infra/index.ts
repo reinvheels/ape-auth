@@ -122,11 +122,18 @@ new aws.iam.RolePolicyAttachment("lambda-vpc-policy", {
 });
 
 const efsMountPath = "/mnt/efs";
-const efsDataDir = `${efsMountPath}/data/ape-auth`;
+const efsDataDir = efsMountPath;
 
 const fn = new aws.lambda.Function("ape-auth", {
   packageType: "Image",
-  imageUri: image.ref,
+  imageUri: image.ref.apply((ref) => {
+    // docker-build returns "repo:tag@sha256:..." but Lambda only accepts "repo@sha256:..." or "repo:tag"
+    const atIndex = ref.indexOf("@");
+    if (atIndex === -1) return ref;
+    const repo = ref.substring(0, ref.indexOf(":"));
+    const digest = ref.substring(atIndex);
+    return `${repo}${digest}`;
+  }),
   architectures: ["arm64"],
   role: role.arn,
   memorySize: 256,

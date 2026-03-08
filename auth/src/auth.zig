@@ -9,6 +9,12 @@ const persist = @import("persist.zig");
 const schema = @import("schema.zig");
 const Ed25519 = std.crypto.sign.Ed25519;
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
+
+fn timestamp(io: Io) i64 {
+    const ts = Io.Clock.real.now(io);
+    return @intCast(@divTrunc(ts.nanoseconds, std.time.ns_per_s));
+}
 
 const id_token_ttl: i64 = 3600; // 1 hour
 const refresh_token_ttl: i64 = 30 * 24 * 3600; // 30 days
@@ -30,6 +36,7 @@ pub const AuthError = error{
 
 pub const Config = struct {
     allocator: Allocator,
+    io: Io,
     base_dir: []const u8,
     key_pair: Ed25519.KeyPair,
     issuer: []const u8,
@@ -70,7 +77,7 @@ pub const DeviceInfo = struct {
 };
 
 fn makeTokenPair(config: Config, account_id: *const [crypto.uuid_len]u8) !TokenPair {
-    const now = std.time.timestamp();
+    const now = timestamp(config.io);
     const id_token = try crypto.createJwt(
         config.allocator,
         config.key_pair,
@@ -81,7 +88,7 @@ fn makeTokenPair(config: Config, account_id: *const [crypto.uuid_len]u8) !TokenP
     );
     return .{
         .id_token = id_token,
-        .refresh_token = crypto.makeCompoundToken(account_id),
+        .refresh_token = crypto.makeCompoundToken(account_id, config.io),
         .expires_in = id_token_ttl,
     };
 }
@@ -91,16 +98,16 @@ pub fn register(config: Config, public_key_hex: []const u8, device_name: []const
     if (public_key_hex.len != crypto.key_len) return AuthError.InvalidPublicKey;
     _ = crypto.hexDecode(32, public_key_hex[0..crypto.key_len]) catch return AuthError.InvalidPublicKey;
 
-    const now = std.time.timestamp();
-    const account_id = crypto.generateUuid();
-    const device_id = crypto.generateUuid();
+    const now = timestamp(config.io);
+    const account_id = crypto.generateUuid(config.io);
+    const device_id = crypto.generateUuid(config.io);
 
     // Atomic duplicate check via key index
-    persist.writeKeyIndex(config.allocator, config.base_dir, public_key_hex, &account_id) catch |err| switch (err) {
+    persist.writeKeyIndex(config.allocator, config.io, config.base_dir, public_key_hex, &account_id) catch |err| switch (err) {
         error.DeviceAlreadyExists => return AuthError.DeviceAlreadyExists,
         else => return err,
     };
-    errdefer persist.removeKeyIndex(config.allocator, config.base_dir, public_key_hex) catch {};
+    errdefer persist.removeKeyIndex(config.allocator, config.io, config.base_dir, public_key_hex) catch {};
 
     const tokens = try makeTokenPair(config, &account_id);
     errdefer config.allocator.free(tokens.id_token);
@@ -125,9 +132,9 @@ pub fn register(config: Config, public_key_hex: []const u8, device_name: []const
         .refresh_tokens = &refresh_tokens,
     };
 
-    persist.createAccountFile(config.allocator, config.base_dir, &account_id, data) catch |err| {
+    persist.createAccountFile(config.allocator, config.io, config.base_dir, &account_id, data) catch |err| {
         config.allocator.free(tokens.id_token);
-        persist.removeKeyIndex(config.allocator, config.base_dir, public_key_hex) catch {};
+        persist.removeKeyIndex(config.allocator, config.io, config.base_dir, public_key_hex) catch {};
         return err;
     };
 
@@ -142,10 +149,10 @@ pub fn register(config: Config, public_key_hex: []const u8, device_name: []const
 pub fn createChallenge(config: Config, public_key_hex: []const u8) !ChallengeResult {
     if (public_key_hex.len != crypto.key_len) return AuthError.InvalidPublicKey;
 
-    const account_id = (try persist.readKeyIndex(config.allocator, config.base_dir, public_key_hex)) orelse
+    const account_id = (try persist.readKeyIndex(config.allocator, config.io, config.base_dir, public_key_hex)) orelse
         return AuthError.DeviceNotFound;
 
-    var locked = (try persist.openAndLockAccount(config.allocator, config.base_dir, &account_id)) orelse
+    var locked = (try persist.openAndLockAccount(config.allocator, config.io, config.base_dir, &account_id)) orelse
         return AuthError.DeviceNotFound;
     defer locked.deinit();
 
@@ -153,9 +160,9 @@ pub fn createChallenge(config: Config, public_key_hex: []const u8) !ChallengeRes
     const device_id = findDeviceByKey(locked.data.value.devices, public_key_hex) orelse
         return AuthError.DeviceNotFound;
 
-    const now = std.time.timestamp();
+    const now = timestamp(config.io);
     var nonce: [32]u8 = undefined;
-    std.crypto.random.bytes(&nonce);
+    config.io.random(&nonce);
     const nonce_hex = crypto.hexEncode(32, &nonce);
 
     // Build new challenges list: existing (pruned) + new
@@ -182,7 +189,7 @@ pub fn createChallenge(config: Config, public_key_hex: []const u8) !ChallengeRes
     var new_data = locked.data.value;
     new_data.challenges = challenges.items;
 
-    try persist.writeAccountData(config.allocator, &locked, new_data);
+    try persist.writeAccountData(config.allocator, config.io, &locked, new_data);
 
     return .{
         .challenge = nonce_hex,
@@ -205,14 +212,14 @@ pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const 
     const sig = Ed25519.Signature.fromBytes(sig_bytes);
     sig.verify(&challenge_bytes, public_key) catch return AuthError.InvalidSignature;
 
-    const account_id = (try persist.readKeyIndex(config.allocator, config.base_dir, public_key_hex)) orelse
+    const account_id = (try persist.readKeyIndex(config.allocator, config.io, config.base_dir, public_key_hex)) orelse
         return AuthError.DeviceNotFound;
 
-    var locked = (try persist.openAndLockAccount(config.allocator, config.base_dir, &account_id)) orelse
+    var locked = (try persist.openAndLockAccount(config.allocator, config.io, config.base_dir, &account_id)) orelse
         return AuthError.DeviceNotFound;
     defer locked.deinit();
 
-    const now = std.time.timestamp();
+    const now = timestamp(config.io);
 
     // Find and consume the challenge
     var found_device_id: ?[crypto.uuid_len]u8 = null;
@@ -260,7 +267,7 @@ pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const 
     new_data.refresh_tokens = rts.items;
     new_data.challenges = challenges.items;
 
-    try persist.writeAccountData(config.allocator, &locked, new_data);
+    try persist.writeAccountData(config.allocator, config.io, &locked, new_data);
 
     return .{
         .account_id = account_id,
@@ -270,7 +277,7 @@ pub fn login(config: Config, public_key_hex: []const u8, challenge_hex: []const 
 
 /// Verify a JWT ID token and return the account_id (sub claim).
 pub fn validateToken(config: Config, token: []const u8) !?[crypto.uuid_len]u8 {
-    var result = crypto.verifyJwt(config.allocator, config.key_pair.public_key, token) catch
+    var result = crypto.verifyJwt(config.allocator, config.key_pair.public_key, token, config.io) catch
         return null;
     defer result.deinit();
 
@@ -282,11 +289,11 @@ pub fn validateToken(config: Config, token: []const u8) !?[crypto.uuid_len]u8 {
 pub fn refreshTokens(config: Config, refresh_token: []const u8) !TokenPair {
     const parts = crypto.parseCompoundToken(refresh_token) orelse return AuthError.TokenNotFound;
 
-    var locked = (try persist.openAndLockAccount(config.allocator, config.base_dir, &parts.account_id)) orelse
+    var locked = (try persist.openAndLockAccount(config.allocator, config.io, config.base_dir, &parts.account_id)) orelse
         return AuthError.TokenNotFound;
     defer locked.deinit();
 
-    const now = std.time.timestamp();
+    const now = timestamp(config.io);
 
     // Find and consume the refresh token
     var found_device_id: ?[]const u8 = null;
@@ -323,7 +330,7 @@ pub fn refreshTokens(config: Config, refresh_token: []const u8) !TokenPair {
     var new_data = locked.data.value;
     new_data.refresh_tokens = rts.items;
 
-    try persist.writeAccountData(config.allocator, &locked, new_data);
+    try persist.writeAccountData(config.allocator, config.io, &locked, new_data);
 
     return tokens;
 }
@@ -333,18 +340,18 @@ pub fn linkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, public
     if (public_key_hex.len != crypto.key_len) return AuthError.InvalidPublicKey;
     _ = crypto.hexDecode(32, public_key_hex[0..crypto.key_len]) catch return AuthError.InvalidPublicKey;
 
-    var locked = (try persist.openAndLockAccount(config.allocator, config.base_dir, account_id)) orelse
+    var locked = (try persist.openAndLockAccount(config.allocator, config.io, config.base_dir, account_id)) orelse
         return AuthError.AccountNotFound;
     defer locked.deinit();
 
     // Write key index first (atomic dup check)
-    persist.writeKeyIndex(config.allocator, config.base_dir, public_key_hex, account_id) catch |err| switch (err) {
+    persist.writeKeyIndex(config.allocator, config.io, config.base_dir, public_key_hex, account_id) catch |err| switch (err) {
         error.DeviceAlreadyExists => return AuthError.DeviceAlreadyExists,
         else => return err,
     };
 
-    const device_id = crypto.generateUuid();
-    const now = std.time.timestamp();
+    const device_id = crypto.generateUuid(config.io);
+    const now = timestamp(config.io);
 
     var devices = std.ArrayListUnmanaged(schema.Device){};
     defer devices.deinit(config.allocator);
@@ -365,8 +372,8 @@ pub fn linkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, public
     var new_data = locked.data.value;
     new_data.devices = devices.items;
 
-    persist.writeAccountData(config.allocator, &locked, new_data) catch |err| {
-        persist.removeKeyIndex(config.allocator, config.base_dir, public_key_hex) catch {};
+    persist.writeAccountData(config.allocator, config.io, &locked, new_data) catch |err| {
+        persist.removeKeyIndex(config.allocator, config.io, config.base_dir, public_key_hex) catch {};
         return err;
     };
 
@@ -377,7 +384,7 @@ pub fn linkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, public
 pub fn unlinkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, device_id_hex: []const u8) !void {
     if (device_id_hex.len != crypto.uuid_len) return AuthError.DeviceNotFound;
 
-    var locked = (try persist.openAndLockAccount(config.allocator, config.base_dir, account_id)) orelse
+    var locked = (try persist.openAndLockAccount(config.allocator, config.io, config.base_dir, account_id)) orelse
         return AuthError.AccountNotFound;
     defer locked.deinit();
 
@@ -400,14 +407,14 @@ pub fn unlinkDevice(config: Config, account_id: *const [crypto.uuid_len]u8, devi
     var new_data = locked.data.value;
     new_data.devices = devices.items;
 
-    try persist.writeAccountData(config.allocator, &locked, new_data);
+    try persist.writeAccountData(config.allocator, config.io, &locked, new_data);
 
-    persist.removeKeyIndex(config.allocator, config.base_dir, removed_pk.?) catch {};
+    persist.removeKeyIndex(config.allocator, config.io, config.base_dir, removed_pk.?) catch {};
 }
 
 /// Get account info including linked devices.
 pub fn getAccountInfo(config: Config, account_id: *const [crypto.uuid_len]u8) !?AccountInfo {
-    var parsed = (try persist.readAccount(config.allocator, config.base_dir, account_id)) orelse
+    var parsed = (try persist.readAccount(config.allocator, config.io, config.base_dir, account_id)) orelse
         return null;
     defer parsed.deinit();
 
@@ -453,21 +460,23 @@ fn findDeviceByKey(devices: []const schema.Device, public_key_hex: []const u8) ?
 fn testConfig(allocator: Allocator, base_dir: []const u8) Config {
     return .{
         .allocator = allocator,
+        .io = std.testing.io,
         .base_dir = base_dir,
-        .key_pair = Ed25519.KeyPair.generate(),
+        .key_pair = Ed25519.KeyPair.generate(std.testing.io),
         .issuer = "https://auth.test",
     };
 }
 
 fn setupTestDir(allocator: Allocator, base_dir: []const u8) !void {
-    std.fs.deleteTreeAbsolute(base_dir) catch {};
-    std.fs.makeDirAbsolute(base_dir) catch |e| switch (e) {
+    const io = std.testing.io;
+    Io.Dir.cwd().deleteTree(io, base_dir) catch {};
+    Io.Dir.createDirAbsolute(io, base_dir, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return e,
     };
     const keys_dir = try std.fmt.allocPrint(allocator, "{s}/keys", .{base_dir});
     defer allocator.free(keys_dir);
-    std.fs.makeDirAbsolute(keys_dir) catch |e| switch (e) {
+    Io.Dir.createDirAbsolute(io, keys_dir, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return e,
     };
@@ -477,11 +486,11 @@ test "register creates account and returns JWT" {
     const allocator = std.testing.allocator;
     const base_dir = "/tmp/ape-auth-test-auth-reg";
     try setupTestDir(allocator, base_dir);
-    defer std.fs.deleteTreeAbsolute(base_dir) catch {};
+    defer Io.Dir.cwd().deleteTree(std.testing.io, base_dir) catch {};
 
     const config = testConfig(allocator, base_dir);
 
-    const kp = Ed25519.KeyPair.generate();
+    const kp = Ed25519.KeyPair.generate(std.testing.io);
     const pk_hex = crypto.hexEncode(32, &kp.public_key.bytes);
 
     const result = try register(config, &pk_hex, "test device");
@@ -495,7 +504,7 @@ test "register creates account and returns JWT" {
     try std.testing.expectEqual(@as(usize, 2), dots);
 
     // Should be verifiable
-    var jwt_result = try crypto.verifyJwt(allocator, config.key_pair.public_key, result.tokens.id_token);
+    var jwt_result = try crypto.verifyJwt(allocator, config.key_pair.public_key, result.tokens.id_token, std.testing.io);
     defer jwt_result.deinit();
     try std.testing.expectEqualStrings(&result.account_id, jwt_result.claims.value.sub);
 }
@@ -504,11 +513,11 @@ test "register rejects duplicate public key" {
     const allocator = std.testing.allocator;
     const base_dir = "/tmp/ape-auth-test-auth-dup";
     try setupTestDir(allocator, base_dir);
-    defer std.fs.deleteTreeAbsolute(base_dir) catch {};
+    defer Io.Dir.cwd().deleteTree(std.testing.io, base_dir) catch {};
 
     const config = testConfig(allocator, base_dir);
 
-    const kp = Ed25519.KeyPair.generate();
+    const kp = Ed25519.KeyPair.generate(std.testing.io);
     const pk_hex = crypto.hexEncode(32, &kp.public_key.bytes);
 
     const r1 = try register(config, &pk_hex, "device 1");
@@ -522,11 +531,11 @@ test "challenge-login flow with JWT" {
     const allocator = std.testing.allocator;
     const base_dir = "/tmp/ape-auth-test-auth-login";
     try setupTestDir(allocator, base_dir);
-    defer std.fs.deleteTreeAbsolute(base_dir) catch {};
+    defer Io.Dir.cwd().deleteTree(std.testing.io, base_dir) catch {};
 
     const config = testConfig(allocator, base_dir);
 
-    const kp = Ed25519.KeyPair.generate();
+    const kp = Ed25519.KeyPair.generate(std.testing.io);
     const pk_hex = crypto.hexEncode(32, &kp.public_key.bytes);
 
     const reg = try register(config, &pk_hex, "test device");
@@ -542,7 +551,7 @@ test "challenge-login flow with JWT" {
     defer allocator.free(login_result.tokens.id_token);
 
     // Verify JWT
-    var jwt_result = try crypto.verifyJwt(allocator, config.key_pair.public_key, login_result.tokens.id_token);
+    var jwt_result = try crypto.verifyJwt(allocator, config.key_pair.public_key, login_result.tokens.id_token, std.testing.io);
     defer jwt_result.deinit();
     try std.testing.expectEqualStrings(&login_result.account_id, jwt_result.claims.value.sub);
 }
@@ -551,18 +560,18 @@ test "login rejects bad signature" {
     const allocator = std.testing.allocator;
     const base_dir = "/tmp/ape-auth-test-auth-badsig";
     try setupTestDir(allocator, base_dir);
-    defer std.fs.deleteTreeAbsolute(base_dir) catch {};
+    defer Io.Dir.cwd().deleteTree(std.testing.io, base_dir) catch {};
 
     const config = testConfig(allocator, base_dir);
 
-    const kp = Ed25519.KeyPair.generate();
+    const kp = Ed25519.KeyPair.generate(std.testing.io);
     const pk_hex = crypto.hexEncode(32, &kp.public_key.bytes);
     const reg = try register(config, &pk_hex, "test device");
     allocator.free(reg.tokens.id_token);
 
     const challenge_result = try createChallenge(config, &pk_hex);
 
-    const bad_kp = Ed25519.KeyPair.generate();
+    const bad_kp = Ed25519.KeyPair.generate(std.testing.io);
     const nonce = crypto.hexDecode(32, &challenge_result.challenge) catch unreachable;
     const bad_sig = try bad_kp.sign(&nonce, null);
     const bad_sig_hex = crypto.hexEncode(64, &bad_sig.toBytes());

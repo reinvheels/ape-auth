@@ -2,10 +2,12 @@ const std = @import("std");
 const crypto = @import("crypto.zig");
 const schema = @import("schema.zig");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 
 pub const LockedAccount = struct {
     allocator: Allocator,
-    lock_file: std.fs.File,
+    io: Io,
+    lock_file: Io.File,
     data: std.json.Parsed(schema.AccountData),
     file_data: []const u8, // raw JSON — parsed slices reference into this
     account_id: [crypto.uuid_len]u8,
@@ -14,7 +16,7 @@ pub const LockedAccount = struct {
     pub fn deinit(self: *LockedAccount) void {
         self.data.deinit();
         self.allocator.free(self.file_data);
-        self.lock_file.close();
+        self.lock_file.close(self.io);
     }
 };
 
@@ -28,13 +30,13 @@ pub fn accountPath(allocator: Allocator, base_dir: []const u8, account_id: *cons
     return try std.fmt.allocPrint(allocator, "{s}/{s}.json", .{ base_dir, sharded });
 }
 
-fn makeDirsRecursive(path: []const u8) !void {
-    std.fs.makeDirAbsolute(path) catch |err| switch (err) {
+fn makeDirsRecursive(io: Io, path: []const u8) !void {
+    Io.Dir.createDirAbsolute(io, path, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => return,
         error.FileNotFound => {
             const parent_end = std.mem.lastIndexOfScalar(u8, path, '/') orelse return err;
-            try makeDirsRecursive(path[0..parent_end]);
-            std.fs.makeDirAbsolute(path) catch |err2| switch (err2) {
+            try makeDirsRecursive(io, path[0..parent_end]);
+            Io.Dir.createDirAbsolute(io, path, .default_dir) catch |err2| switch (err2) {
                 error.PathAlreadyExists => return,
                 else => return err2,
             };
@@ -45,21 +47,21 @@ fn makeDirsRecursive(path: []const u8) !void {
 
 /// Read and parse account data without locking. For read-only access.
 /// Returns null if the account file doesn't exist.
-pub fn readAccount(allocator: Allocator, base_dir: []const u8, account_id: *const [crypto.uuid_len]u8) !?std.json.Parsed(schema.AccountData) {
+pub fn readAccount(allocator: Allocator, io: Io, base_dir: []const u8, account_id: *const [crypto.uuid_len]u8) !?std.json.Parsed(schema.AccountData) {
     const path = try accountPath(allocator, base_dir, account_id);
     defer allocator.free(path);
 
-    const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+    const file = Io.Dir.openFileAbsolute(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
-    defer file.close();
+    defer file.close(io);
 
-    const stat = try file.stat();
+    const stat = try file.stat(io);
     const file_data = try allocator.alloc(u8, stat.size);
     defer allocator.free(file_data);
 
-    const n = try file.readAll(file_data);
+    const n = try file.readPositionalAll(io, file_data, 0);
 
     return try std.json.parseFromSlice(schema.AccountData, allocator, file_data[0..n], .{
         .allocate = .alloc_always,
@@ -69,39 +71,40 @@ pub fn readAccount(allocator: Allocator, base_dir: []const u8, account_id: *cons
 
 /// Open the lock file with exclusive flock, read and parse the account data.
 /// Returns null if the account file doesn't exist.
-pub fn openAndLockAccount(allocator: Allocator, base_dir: []const u8, account_id: *const [crypto.uuid_len]u8) !?LockedAccount {
+pub fn openAndLockAccount(allocator: Allocator, io: Io, base_dir: []const u8, account_id: *const [crypto.uuid_len]u8) !?LockedAccount {
     const path = try accountPath(allocator, base_dir, account_id);
     defer allocator.free(path);
 
     const lock_path = try std.fmt.allocPrint(allocator, "{s}.lock", .{path});
     defer allocator.free(lock_path);
 
-    const lock_file = std.fs.openFileAbsolute(lock_path, .{ .mode = .read_write }) catch |err| switch (err) {
+    const lock_file = Io.Dir.openFileAbsolute(io, lock_path, .{ .mode = .read_write }) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
-    errdefer lock_file.close();
+    errdefer lock_file.close(io);
 
-    try lock_file.lock(.exclusive);
+    try lock_file.lock(io, .exclusive);
 
-    const data_file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+    const data_file = Io.Dir.openFileAbsolute(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => {
-            lock_file.close();
+            lock_file.close(io);
             return null;
         },
         else => return err,
     };
-    defer data_file.close();
+    defer data_file.close(io);
 
-    const stat = try data_file.stat();
+    const stat = try data_file.stat(io);
     const file_data = try allocator.alloc(u8, stat.size);
     errdefer allocator.free(file_data);
-    const n = try data_file.readAll(file_data);
+    const n = try data_file.readPositionalAll(io, file_data, 0);
 
     const parsed = try schema.parse(allocator, file_data[0..n]);
 
     return .{
         .allocator = allocator,
+        .io = io,
         .lock_file = lock_file,
         .data = parsed,
         .file_data = file_data,
@@ -111,7 +114,7 @@ pub fn openAndLockAccount(allocator: Allocator, base_dir: []const u8, account_id
 }
 
 /// Write new data to the account file (atomic tmp+rename). Caller must deinit locked.
-pub fn writeAccountData(allocator: Allocator, locked: *LockedAccount, new_data: schema.AccountData) !void {
+pub fn writeAccountData(allocator: Allocator, io: Io, locked: *LockedAccount, new_data: schema.AccountData) !void {
     const path = try accountPath(allocator, locked.base_dir, &locked.account_id);
     defer allocator.free(path);
 
@@ -121,35 +124,35 @@ pub fn writeAccountData(allocator: Allocator, locked: *LockedAccount, new_data: 
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
     defer allocator.free(tmp_path);
 
-    const file = try std.fs.createFileAbsolute(tmp_path, .{});
-    try file.writeAll(serialized);
-    file.close();
+    const file = try Io.Dir.createFileAbsolute(io, tmp_path, .{});
+    try file.writePositionalAll(io, serialized, 0);
+    file.close(io);
 
-    try std.fs.renameAbsolute(tmp_path, path);
+    try Io.Dir.renameAbsolute(tmp_path, path, io);
 }
 
 /// Create a new account: create dirs, lock file, and data file.
-pub fn createAccountFile(allocator: Allocator, base_dir: []const u8, account_id: *const [crypto.uuid_len]u8, data: schema.AccountData) !void {
+pub fn createAccountFile(allocator: Allocator, io: Io, base_dir: []const u8, account_id: *const [crypto.uuid_len]u8, data: schema.AccountData) !void {
     const path = try accountPath(allocator, base_dir, account_id);
     defer allocator.free(path);
 
     // Create parent directories
     const dir_end = std.mem.lastIndexOfScalar(u8, path, '/') orelse return error.InvalidPath;
-    try makeDirsRecursive(path[0..dir_end]);
+    try makeDirsRecursive(io, path[0..dir_end]);
 
     // Create lock file
     const lock_path = try std.fmt.allocPrint(allocator, "{s}.lock", .{path});
     defer allocator.free(lock_path);
-    const lock_file = try std.fs.createFileAbsolute(lock_path, .{});
-    lock_file.close();
+    const lock_file = try Io.Dir.createFileAbsolute(io, lock_path, .{});
+    lock_file.close(io);
 
     // Write data file
     const serialized = try schema.serialize(allocator, data);
     defer allocator.free(serialized);
 
-    const file = try std.fs.createFileAbsolute(path, .{});
-    try file.writeAll(serialized);
-    file.close();
+    const file = try Io.Dir.createFileAbsolute(io, path, .{});
+    try file.writePositionalAll(io, serialized, 0);
+    file.close(io);
 }
 
 // --- Key Index ---
@@ -157,45 +160,45 @@ pub fn createAccountFile(allocator: Allocator, base_dir: []const u8, account_id:
 /// Create keys/<pk_hex> containing the account_id.
 /// Uses O_CREAT|O_EXCL for atomic race-safe duplicate detection.
 /// Returns error.DeviceAlreadyExists if the key file already exists.
-pub fn writeKeyIndex(allocator: Allocator, base_dir: []const u8, pk_hex: []const u8, account_id: *const [crypto.uuid_len]u8) !void {
+pub fn writeKeyIndex(allocator: Allocator, io: Io, base_dir: []const u8, pk_hex: []const u8, account_id: *const [crypto.uuid_len]u8) !void {
     const path = try std.fmt.allocPrint(allocator, "{s}/keys/{s}", .{ base_dir, pk_hex });
     defer allocator.free(path);
 
-    const file = std.fs.createFileAbsolute(path, .{ .exclusive = true }) catch |err| switch (err) {
+    const file = Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true }) catch |err| switch (err) {
         error.PathAlreadyExists => return error.DeviceAlreadyExists,
         else => return err,
     };
-    file.writeAll(account_id) catch {
-        file.close();
-        std.fs.deleteFileAbsolute(path) catch {};
+    file.writePositionalAll(io, account_id, 0) catch {
+        file.close(io);
+        Io.Dir.deleteFileAbsolute(io, path) catch {};
         return error.WriteFailed;
     };
-    file.close();
+    file.close(io);
 }
 
 /// Read keys/<pk_hex> to get the account_id.
-pub fn readKeyIndex(allocator: Allocator, base_dir: []const u8, pk_hex: []const u8) !?[crypto.uuid_len]u8 {
+pub fn readKeyIndex(allocator: Allocator, io: Io, base_dir: []const u8, pk_hex: []const u8) !?[crypto.uuid_len]u8 {
     const path = try std.fmt.allocPrint(allocator, "{s}/keys/{s}", .{ base_dir, pk_hex });
     defer allocator.free(path);
 
-    const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+    const file = Io.Dir.openFileAbsolute(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
-    defer file.close();
+    defer file.close(io);
 
     var buf: [crypto.uuid_len]u8 = undefined;
-    const n = try file.readAll(&buf);
+    const n = try file.readPositionalAll(io, &buf, 0);
     if (n != crypto.uuid_len) return null;
     return buf;
 }
 
 /// Delete keys/<pk_hex>.
-pub fn removeKeyIndex(allocator: Allocator, base_dir: []const u8, pk_hex: []const u8) !void {
+pub fn removeKeyIndex(allocator: Allocator, io: Io, base_dir: []const u8, pk_hex: []const u8) !void {
     const path = try std.fmt.allocPrint(allocator, "{s}/keys/{s}", .{ base_dir, pk_hex });
     defer allocator.free(path);
 
-    std.fs.deleteFileAbsolute(path) catch |err| switch (err) {
+    Io.Dir.deleteFileAbsolute(io, path) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
@@ -212,11 +215,12 @@ test "accountPath produces sharded path" {
 
 test "createAccountFile and openAndLockAccount roundtrip" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
     const base_dir = "/tmp/ape-auth-test-persist2";
 
-    std.fs.deleteTreeAbsolute(base_dir) catch {};
-    defer std.fs.deleteTreeAbsolute(base_dir) catch {};
-    try makeDirsRecursive(base_dir);
+    Io.Dir.cwd().deleteTree(io, base_dir) catch {};
+    defer Io.Dir.cwd().deleteTree(io, base_dir) catch {};
+    try makeDirsRecursive(io, base_dir);
 
     const account_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890".*;
     const device_id = "d1d2d3d4-d5d6-d7d8-d9da-dbdcdddedfee".*;
@@ -235,9 +239,9 @@ test "createAccountFile and openAndLockAccount roundtrip" {
         .refresh_tokens = &.{},
     };
 
-    try createAccountFile(allocator, base_dir, &account_id, data);
+    try createAccountFile(allocator, io, base_dir, &account_id, data);
 
-    var locked = (try openAndLockAccount(allocator, base_dir, &account_id)) orelse return error.TestFailed;
+    var locked = (try openAndLockAccount(allocator, io, base_dir, &account_id)) orelse return error.TestFailed;
     defer locked.deinit();
 
     try std.testing.expectEqualStrings(&account_id, locked.data.value.account.id);
@@ -246,69 +250,73 @@ test "createAccountFile and openAndLockAccount roundtrip" {
 
 test "openAndLockAccount returns null for missing account" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
     const id = "00000000-0000-0000-0000-000000000000".*;
-    const result = try openAndLockAccount(allocator, "/tmp/ape-auth-test-nonexistent", &id);
+    const result = try openAndLockAccount(allocator, io, "/tmp/ape-auth-test-nonexistent", &id);
     try std.testing.expect(result == null);
 }
 
 test "writeKeyIndex and readKeyIndex roundtrip" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
     const base_dir = "/tmp/ape-auth-test-keys";
 
-    std.fs.deleteTreeAbsolute(base_dir) catch {};
-    defer std.fs.deleteTreeAbsolute(base_dir) catch {};
+    Io.Dir.cwd().deleteTree(io, base_dir) catch {};
+    defer Io.Dir.cwd().deleteTree(io, base_dir) catch {};
 
     const keys_dir = try std.fmt.allocPrint(allocator, "{s}/keys", .{base_dir});
     defer allocator.free(keys_dir);
-    try makeDirsRecursive(keys_dir);
+    try makeDirsRecursive(io, keys_dir);
 
     const pk_hex = "ab" ** 32;
     const account_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890".*;
 
-    try writeKeyIndex(allocator, base_dir, pk_hex[0..], &account_id);
+    try writeKeyIndex(allocator, io, base_dir, pk_hex[0..], &account_id);
 
-    const result = try readKeyIndex(allocator, base_dir, pk_hex[0..]);
+    const result = try readKeyIndex(allocator, io, base_dir, pk_hex[0..]);
     try std.testing.expect(result != null);
     try std.testing.expectEqualSlices(u8, &account_id, &result.?);
 }
 
 test "writeKeyIndex rejects duplicate" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
     const base_dir = "/tmp/ape-auth-test-keys-dup";
 
-    std.fs.deleteTreeAbsolute(base_dir) catch {};
-    defer std.fs.deleteTreeAbsolute(base_dir) catch {};
+    Io.Dir.cwd().deleteTree(io, base_dir) catch {};
+    defer Io.Dir.cwd().deleteTree(io, base_dir) catch {};
 
     const keys_dir = try std.fmt.allocPrint(allocator, "{s}/keys", .{base_dir});
     defer allocator.free(keys_dir);
-    try makeDirsRecursive(keys_dir);
+    try makeDirsRecursive(io, keys_dir);
 
     const pk_hex = "cd" ** 32;
     const account_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890".*;
 
-    try writeKeyIndex(allocator, base_dir, pk_hex[0..], &account_id);
+    try writeKeyIndex(allocator, io, base_dir, pk_hex[0..], &account_id);
 
-    const result = writeKeyIndex(allocator, base_dir, pk_hex[0..], &account_id);
+    const result = writeKeyIndex(allocator, io, base_dir, pk_hex[0..], &account_id);
     try std.testing.expectError(error.DeviceAlreadyExists, result);
 }
 
 test "removeKeyIndex deletes key file" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
     const base_dir = "/tmp/ape-auth-test-keys-rm";
 
-    std.fs.deleteTreeAbsolute(base_dir) catch {};
-    defer std.fs.deleteTreeAbsolute(base_dir) catch {};
+    Io.Dir.cwd().deleteTree(io, base_dir) catch {};
+    defer Io.Dir.cwd().deleteTree(io, base_dir) catch {};
 
     const keys_dir = try std.fmt.allocPrint(allocator, "{s}/keys", .{base_dir});
     defer allocator.free(keys_dir);
-    try makeDirsRecursive(keys_dir);
+    try makeDirsRecursive(io, keys_dir);
 
     const pk_hex = "ef" ** 32;
     const account_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890".*;
 
-    try writeKeyIndex(allocator, base_dir, pk_hex[0..], &account_id);
-    try removeKeyIndex(allocator, base_dir, pk_hex[0..]);
+    try writeKeyIndex(allocator, io, base_dir, pk_hex[0..], &account_id);
+    try removeKeyIndex(allocator, io, base_dir, pk_hex[0..]);
 
-    const result = try readKeyIndex(allocator, base_dir, pk_hex[0..]);
+    const result = try readKeyIndex(allocator, io, base_dir, pk_hex[0..]);
     try std.testing.expect(result == null);
 }
