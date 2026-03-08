@@ -121,7 +121,8 @@ new aws.iam.RolePolicyAttachment("lambda-vpc-policy", {
   policyArn: aws.iam.ManagedPolicies.AWSLambdaVPCAccessExecutionRole,
 });
 
-const efsDataDir = "/mnt/data";
+const efsMountPath = "/mnt/efs";
+const efsDataDir = `${efsMountPath}/data/ape-auth`;
 
 const fn = new aws.lambda.Function("ape-auth", {
   packageType: "Image",
@@ -143,7 +144,7 @@ const fn = new aws.lambda.Function("ape-auth", {
   },
   fileSystemConfig: {
     arn: accessPoint.arn,
-    localMountPath: efsDataDir,
+    localMountPath: efsMountPath,
   },
 }, { dependsOn: [mountTarget] });
 
