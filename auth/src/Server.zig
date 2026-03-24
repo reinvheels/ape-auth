@@ -113,6 +113,23 @@ fn route(self: *Server, method: []const u8, path: []const u8, headers: []const u
         if (!is_get) return sendMethodNotAllowed(w, "GET");
         self.handleGetAccount(headers, w);
     }
+    // WebAuthn
+    else if (std.mem.eql(u8, path, "/auth/webauthn/register/options")) {
+        if (!is_post) return sendMethodNotAllowed(w, "POST");
+        if (!hasContentType(headers, "application/json")) return sendError(w, .bad_request, "expected content-type: application/json");
+        self.handleWebAuthnRegisterOptions(body, w);
+    } else if (std.mem.eql(u8, path, "/auth/webauthn/register/verify")) {
+        if (!is_post) return sendMethodNotAllowed(w, "POST");
+        if (!hasContentType(headers, "application/json")) return sendError(w, .bad_request, "expected content-type: application/json");
+        self.handleWebAuthnRegisterVerify(body, w);
+    } else if (std.mem.eql(u8, path, "/auth/webauthn/login/options")) {
+        if (!is_post) return sendMethodNotAllowed(w, "POST");
+        self.handleWebAuthnLoginOptions(w);
+    } else if (std.mem.eql(u8, path, "/auth/webauthn/login/verify")) {
+        if (!is_post) return sendMethodNotAllowed(w, "POST");
+        if (!hasContentType(headers, "application/json")) return sendError(w, .bad_request, "expected content-type: application/json");
+        self.handleWebAuthnLoginVerify(body, w);
+    }
     // Health
     else if (std.mem.eql(u8, path, "/health")) {
         if (!is_get) return sendMethodNotAllowed(w, "GET");
@@ -411,6 +428,165 @@ fn handleGetAccount(self: *Server, headers: []const u8, w: *Io.Writer) void {
     sendJson(w, .ok, bw.buffered());
 }
 
+// --- WebAuthn Handlers ---
+
+fn handleWebAuthnRegisterOptions(self: *Server, body: []const u8, w: *Io.Writer) void {
+    const req = parseJson(struct { display_name: []const u8 = "Passkey" }, body) catch {
+        sendError(w, .bad_request, "invalid request body");
+        return;
+    };
+
+    const result = auth.webauthnRegisterOptions(self.config, req.display_name) catch {
+        sendError(w, .internal_server_error, "internal error");
+        return;
+    };
+    defer self.config.allocator.free(result.challenge_b64);
+    defer self.config.allocator.free(result.user_id_b64);
+
+    const rp_id = auth.rpIdFromIssuer(self.config.issuer);
+
+    var body_buf: [2048]u8 = undefined;
+    const resp_body = std.fmt.bufPrint(&body_buf,
+        \\{{"publicKey":{{"challenge":"{s}","rp":{{"id":"{s}","name":"{s}"}},"user":{{"id":"{s}","name":"user","displayName":"{s}"}},"pubKeyCredParams":[{{"type":"public-key","alg":-7}}],"authenticatorSelection":{{"residentKey":"required","userVerification":"required"}},"attestation":"none","timeout":60000}}}}
+    , .{ result.challenge_b64, rp_id, rp_id, result.user_id_b64, req.display_name }) catch {
+        sendError(w, .internal_server_error, "internal error");
+        return;
+    };
+
+    sendJson(w, .ok, resp_body);
+}
+
+fn handleWebAuthnRegisterVerify(self: *Server, body: []const u8, w: *Io.Writer) void {
+    const req = parseJsonLenient(struct {
+        id: []const u8,
+        response: struct {
+            clientDataJSON: []const u8,
+            attestationObject: []const u8,
+        },
+    }, body) catch {
+        sendError(w, .bad_request, "invalid request body");
+        return;
+    };
+
+    // clientDataJSON comes as base64url from browser — decode it
+    const client_data_json = crypto.base64urlDecodeAlloc(self.config.allocator, req.response.clientDataJSON) catch {
+        sendError(w, .bad_request, "invalid clientDataJSON encoding");
+        return;
+    };
+    defer self.config.allocator.free(client_data_json);
+
+    const result = auth.webauthnRegisterVerify(
+        self.config,
+        req.id,
+        client_data_json,
+        req.response.attestationObject,
+    ) catch |err| {
+        switch (err) {
+            error.DeviceAlreadyExists => sendError(w, .conflict, "credential already registered"),
+            error.InvalidSignature => sendError(w, .bad_request, "invalid attestation"),
+            error.ChallengeNotFound => sendError(w, .bad_request, "challenge not found"),
+            error.ChallengeExpired => sendError(w, .bad_request, "challenge expired"),
+            error.InvalidChallenge => sendError(w, .bad_request, "invalid challenge"),
+            else => sendError(w, .internal_server_error, "internal error"),
+        }
+        return;
+    };
+    defer self.config.allocator.free(result.tokens.id_token);
+
+    var body_buf: [2048]u8 = undefined;
+    const resp_body = std.fmt.bufPrint(&body_buf,
+        \\{{"account_id":"{s}","device_id":"{s}","id_token":"{s}","access_token":"{s}","refresh_token":"{s}","expires_in":{d}}}
+    , .{
+        result.account_id,
+        result.device_id,
+        result.tokens.id_token,
+        result.tokens.id_token,
+        result.tokens.refresh_token,
+        result.tokens.expires_in,
+    }) catch {
+        sendError(w, .internal_server_error, "internal error");
+        return;
+    };
+
+    sendJson(w, .ok, resp_body);
+}
+
+fn handleWebAuthnLoginOptions(self: *Server, w: *Io.Writer) void {
+    const result = auth.webauthnLoginOptions(self.config) catch {
+        sendError(w, .internal_server_error, "internal error");
+        return;
+    };
+    defer self.config.allocator.free(result.challenge_b64);
+
+    const rp_id = auth.rpIdFromIssuer(self.config.issuer);
+
+    var body_buf: [512]u8 = undefined;
+    const resp_body = std.fmt.bufPrint(&body_buf,
+        \\{{"publicKey":{{"challenge":"{s}","rpId":"{s}","userVerification":"required","timeout":60000}}}}
+    , .{ result.challenge_b64, rp_id }) catch {
+        sendError(w, .internal_server_error, "internal error");
+        return;
+    };
+
+    sendJson(w, .ok, resp_body);
+}
+
+fn handleWebAuthnLoginVerify(self: *Server, body: []const u8, w: *Io.Writer) void {
+    const req = parseJsonLenient(struct {
+        id: []const u8,
+        response: struct {
+            clientDataJSON: []const u8,
+            authenticatorData: []const u8,
+            signature: []const u8,
+        },
+    }, body) catch {
+        sendError(w, .bad_request, "invalid request body");
+        return;
+    };
+
+    // clientDataJSON comes as base64url from browser — decode it
+    const client_data_json = crypto.base64urlDecodeAlloc(self.config.allocator, req.response.clientDataJSON) catch {
+        sendError(w, .bad_request, "invalid clientDataJSON encoding");
+        return;
+    };
+    defer self.config.allocator.free(client_data_json);
+
+    const result = auth.webauthnLoginVerify(
+        self.config,
+        req.id,
+        client_data_json,
+        req.response.authenticatorData,
+        req.response.signature,
+    ) catch |err| {
+        switch (err) {
+            error.InvalidSignature => sendError(w, .unauthorized, "invalid signature"),
+            error.ChallengeNotFound => sendError(w, .bad_request, "challenge not found"),
+            error.ChallengeExpired => sendError(w, .bad_request, "challenge expired"),
+            error.InvalidChallenge => sendError(w, .bad_request, "invalid challenge"),
+            error.DeviceNotFound => sendError(w, .not_found, "credential not found"),
+            else => sendError(w, .internal_server_error, "internal error"),
+        }
+        return;
+    };
+    defer self.config.allocator.free(result.tokens.id_token);
+
+    var body_buf: [2048]u8 = undefined;
+    const resp_body = std.fmt.bufPrint(&body_buf,
+        \\{{"account_id":"{s}","id_token":"{s}","access_token":"{s}","refresh_token":"{s}","expires_in":{d}}}
+    , .{
+        result.account_id,
+        result.tokens.id_token,
+        result.tokens.id_token,
+        result.tokens.refresh_token,
+        result.tokens.expires_in,
+    }) catch {
+        sendError(w, .internal_server_error, "internal error");
+        return;
+    };
+
+    sendJson(w, .ok, resp_body);
+}
+
 fn authenticate(self: *Server, headers: []const u8) auth.AuthError![crypto.uuid_len]u8 {
     const token = extractBearerToken(headers) orelse return auth.AuthError.Unauthorized;
     return (auth.validateToken(self.config, token) catch return auth.AuthError.Unauthorized) orelse return auth.AuthError.Unauthorized;
@@ -445,6 +621,16 @@ fn parseJson(comptime T: type, body: []const u8) !T {
     // Slices in the returned value reference body, not the parse arena,
     // so it's safe to free the arena here. Body outlives the handler scope.
     var parsed = try std.json.parseFromSlice(T, std.heap.page_allocator, body, .{});
+    defer parsed.deinit();
+    return parsed.value;
+}
+
+/// Like parseJson but ignores unknown fields. Used for WebAuthn endpoints
+/// where the browser credential response includes extra fields (e.g. "type").
+fn parseJsonLenient(comptime T: type, body: []const u8) !T {
+    var parsed = try std.json.parseFromSlice(T, std.heap.page_allocator, body, .{
+        .ignore_unknown_fields = true,
+    });
     defer parsed.deinit();
     return parsed.value;
 }

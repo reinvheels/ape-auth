@@ -92,10 +92,29 @@ fn hexVal(c: u8) !u4 {
 
 const b64url = std.base64.url_safe_no_pad;
 
-fn base64urlEncodeAlloc(allocator: Allocator, data: []const u8) ![]const u8 {
+pub fn base64urlEncodeAlloc(allocator: Allocator, data: []const u8) ![]const u8 {
     const len = b64url.Encoder.calcSize(data.len);
     const buf = try allocator.alloc(u8, len);
     return b64url.Encoder.encode(buf, data);
+}
+
+pub fn base64urlDecodeAlloc(allocator: Allocator, encoded: []const u8) ![]const u8 {
+    const len = b64url.Decoder.calcSizeForSlice(encoded) catch return error.InvalidBase64;
+    const buf = try allocator.alloc(u8, len);
+    b64url.Decoder.decode(buf, encoded) catch {
+        allocator.free(buf);
+        return error.InvalidBase64;
+    };
+    return buf;
+}
+
+/// Decode base64url into a fixed-size buffer. Returns error if length doesn't match.
+pub fn base64urlDecode(comptime n: usize, encoded: []const u8) ![n]u8 {
+    const len = b64url.Decoder.calcSizeForSlice(encoded) catch return error.InvalidBase64;
+    if (len != n) return error.InvalidBase64;
+    var buf: [n]u8 = undefined;
+    b64url.Decoder.decode(&buf, encoded) catch return error.InvalidBase64;
+    return buf;
 }
 
 // --- JWT (EdDSA / Ed25519) ---

@@ -70,6 +70,14 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(keys_dir);
     try ensureDir(io, keys_dir);
 
+    const creds_dir = try std.fmt.allocPrint(allocator, "{s}/credentials", .{data_dir});
+    defer allocator.free(creds_dir);
+    try ensureDir(io, creds_dir);
+
+    const wn_challenges_dir = try std.fmt.allocPrint(allocator, "{s}/webauthn_challenges", .{data_dir});
+    defer allocator.free(wn_challenges_dir);
+    try ensureDir(io, wn_challenges_dir);
+
     // Load or generate Ed25519 signing keypair
     const secret_path = try std.fmt.allocPrint(allocator, "{s}/server.key", .{data_dir});
     defer allocator.free(secret_path);
@@ -115,6 +123,8 @@ comptime {
     _ = @import("auth.zig");
     _ = @import("schema.zig");
     _ = @import("persist.zig");
+    _ = @import("cbor.zig");
+    _ = @import("webauthn.zig");
 }
 
 test "smoke" {

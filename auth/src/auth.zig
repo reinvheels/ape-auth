@@ -7,9 +7,11 @@ const std = @import("std");
 const crypto = @import("crypto.zig");
 const persist = @import("persist.zig");
 const schema = @import("schema.zig");
+const webauthn = @import("webauthn.zig");
 const Ed25519 = std.crypto.sign.Ed25519;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const Sha256 = std.crypto.hash.sha2.Sha256;
 
 fn timestamp(io: Io) i64 {
     const ts = Io.Clock.real.now(io);
@@ -442,6 +444,294 @@ pub fn getAccountInfo(config: Config, account_id: *const [crypto.uuid_len]u8) !?
         .created_at = acc.created_at,
         .devices = devices[0..count],
     };
+}
+
+// --- WebAuthn ---
+
+pub const WebAuthnRegisterOptions = struct {
+    challenge_b64: []const u8, // base64url — caller must free with config.allocator
+    account_id: [crypto.uuid_len]u8,
+    user_id_b64: []const u8, // base64url — caller must free with config.allocator
+};
+
+pub const WebAuthnRegisterResult = struct {
+    account_id: [crypto.uuid_len]u8,
+    device_id: [crypto.uuid_len]u8,
+    tokens: TokenPair,
+};
+
+pub const WebAuthnLoginOptions = struct {
+    challenge_b64: []const u8, // base64url — caller must free with config.allocator
+};
+
+pub fn webauthnRegisterOptions(config: Config, display_name: []const u8) !WebAuthnRegisterOptions {
+    const account_id = crypto.generateUuid(config.io);
+
+    // Generate random challenge
+    var challenge_bytes: [32]u8 = undefined;
+    config.io.random(&challenge_bytes);
+    const challenge_b64 = try crypto.base64urlEncodeAlloc(config.allocator, &challenge_bytes);
+    errdefer config.allocator.free(challenge_b64);
+
+    const user_id_b64 = try crypto.base64urlEncodeAlloc(config.allocator, &account_id);
+    errdefer config.allocator.free(user_id_b64);
+
+    const now = timestamp(config.io);
+
+    // Store challenge for later verification
+    persist.writeWebAuthnChallenge(config.allocator, config.io, config.base_dir, challenge_b64, .{
+        .type = "create",
+        .expires_at = now + challenge_ttl,
+        .account_id = &account_id,
+        .display_name = display_name,
+    }) catch return error.ChallengeStoreFailed;
+
+    return .{
+        .challenge_b64 = challenge_b64,
+        .account_id = account_id,
+        .user_id_b64 = user_id_b64,
+    };
+}
+
+pub fn webauthnRegisterVerify(
+    config: Config,
+    credential_id_b64: []const u8,
+    client_data_json: []const u8,
+    attestation_object_b64: []const u8,
+) !WebAuthnRegisterResult {
+    // Decode attestation object
+    const attestation_object = crypto.base64urlDecodeAlloc(config.allocator, attestation_object_b64) catch
+        return AuthError.InvalidSignature;
+    defer config.allocator.free(attestation_object);
+
+    // Derive rp_id and origin from issuer
+    const rp_id = rpIdFromIssuer(config.issuer);
+    const origin = config.issuer;
+
+    // Extract challenge from clientDataJSON to look up stored challenge
+    const client_data = parseClientDataChallenge(client_data_json) orelse
+        return AuthError.InvalidChallenge;
+
+    // Consume stored challenge
+    var challenge_data = (persist.consumeWebAuthnChallenge(
+        config.allocator,
+        config.io,
+        config.base_dir,
+        client_data.challenge,
+    ) catch return AuthError.InvalidChallenge) orelse return AuthError.ChallengeNotFound;
+    defer challenge_data.deinit();
+
+    const now = timestamp(config.io);
+    if (challenge_data.value.expires_at <= now) return AuthError.ChallengeExpired;
+    if (!std.mem.eql(u8, challenge_data.value.type, "create")) return AuthError.InvalidChallenge;
+
+    // Verify attestation
+    const result = webauthn.verifyAttestation(
+        client_data_json,
+        attestation_object,
+        client_data.challenge,
+        origin,
+        rp_id,
+    ) catch return AuthError.InvalidSignature;
+
+    // Get account_id from stored challenge
+    if (challenge_data.value.account_id.len != crypto.uuid_len) return AuthError.InvalidChallenge;
+    const account_id = challenge_data.value.account_id[0..crypto.uuid_len].*;
+
+    // Write credential index
+    persist.writeCredentialIndex(config.allocator, config.io, config.base_dir, credential_id_b64, &account_id) catch |err| switch (err) {
+        error.DeviceAlreadyExists => return AuthError.DeviceAlreadyExists,
+        else => return err,
+    };
+    errdefer persist.removeCredentialIndex(config.allocator, config.io, config.base_dir, credential_id_b64) catch {};
+
+    const device_id = crypto.generateUuid(config.io);
+    const tokens = try makeTokenPair(config, &account_id);
+    errdefer config.allocator.free(tokens.id_token);
+
+    const refresh_parts = crypto.parseCompoundToken(&tokens.refresh_token).?;
+
+    // Encode public key as base64url for storage
+    const pk_b64 = try crypto.base64urlEncodeAlloc(config.allocator, &result.public_key);
+    defer config.allocator.free(pk_b64);
+
+    const devices = [_]schema.Device{};
+    const webauthn_creds = [_]schema.WebAuthnCredential{.{
+        .id = &device_id,
+        .credential_id = credential_id_b64,
+        .public_key = pk_b64,
+        .sign_count = result.sign_count,
+        .name = challenge_data.value.display_name,
+        .created_at = now,
+    }};
+    const refresh_tokens = [_]schema.Token{.{
+        .token = &refresh_parts.token_part,
+        .device_id = &device_id,
+        .expires_at = now + refresh_token_ttl,
+    }};
+
+    const data = schema.AccountData{
+        .account = .{ .id = &account_id, .created_at = now },
+        .devices = &devices,
+        .refresh_tokens = &refresh_tokens,
+        .webauthn_credentials = &webauthn_creds,
+    };
+
+    persist.createAccountFile(config.allocator, config.io, config.base_dir, &account_id, data) catch |err| {
+        config.allocator.free(tokens.id_token);
+        persist.removeCredentialIndex(config.allocator, config.io, config.base_dir, credential_id_b64) catch {};
+        return err;
+    };
+
+    return .{
+        .account_id = account_id,
+        .device_id = device_id,
+        .tokens = tokens,
+    };
+}
+
+pub fn webauthnLoginOptions(config: Config) !WebAuthnLoginOptions {
+    var challenge_bytes: [32]u8 = undefined;
+    config.io.random(&challenge_bytes);
+    const challenge_b64 = try crypto.base64urlEncodeAlloc(config.allocator, &challenge_bytes);
+    errdefer config.allocator.free(challenge_b64);
+
+    const now = timestamp(config.io);
+
+    persist.writeWebAuthnChallenge(config.allocator, config.io, config.base_dir, challenge_b64, .{
+        .type = "get",
+        .expires_at = now + challenge_ttl,
+    }) catch return error.ChallengeStoreFailed;
+
+    return .{
+        .challenge_b64 = challenge_b64,
+    };
+}
+
+pub fn webauthnLoginVerify(
+    config: Config,
+    credential_id_b64: []const u8,
+    client_data_json: []const u8,
+    authenticator_data_b64: []const u8,
+    signature_b64: []const u8,
+) !LoginResult {
+    // Decode binary fields
+    const authenticator_data = crypto.base64urlDecodeAlloc(config.allocator, authenticator_data_b64) catch
+        return AuthError.InvalidSignature;
+    defer config.allocator.free(authenticator_data);
+
+    const signature = crypto.base64urlDecodeAlloc(config.allocator, signature_b64) catch
+        return AuthError.InvalidSignature;
+    defer config.allocator.free(signature);
+
+    const rp_id = rpIdFromIssuer(config.issuer);
+    const origin = config.issuer;
+
+    // Extract and consume challenge
+    const client_data = parseClientDataChallenge(client_data_json) orelse
+        return AuthError.InvalidChallenge;
+
+    var challenge_data = (persist.consumeWebAuthnChallenge(
+        config.allocator,
+        config.io,
+        config.base_dir,
+        client_data.challenge,
+    ) catch return AuthError.InvalidChallenge) orelse return AuthError.ChallengeNotFound;
+    defer challenge_data.deinit();
+
+    const now = timestamp(config.io);
+    if (challenge_data.value.expires_at <= now) return AuthError.ChallengeExpired;
+    if (!std.mem.eql(u8, challenge_data.value.type, "get")) return AuthError.InvalidChallenge;
+
+    // Look up credential → account
+    const account_id = (try persist.readCredentialIndex(config.allocator, config.io, config.base_dir, credential_id_b64)) orelse
+        return AuthError.DeviceNotFound;
+
+    // Load account, find credential, get stored public key
+    var locked = (try persist.openAndLockAccount(config.allocator, config.io, config.base_dir, &account_id)) orelse
+        return AuthError.DeviceNotFound;
+    defer locked.deinit();
+
+    const cred = findWebAuthnCredential(locked.data.value.webauthn_credentials, credential_id_b64) orelse
+        return AuthError.DeviceNotFound;
+
+    // Decode stored public key
+    const stored_pk = crypto.base64urlDecode(65, cred.public_key) catch
+        return AuthError.InvalidSignature;
+
+    // Verify assertion
+    _ = webauthn.verifyAssertion(
+        client_data_json,
+        authenticator_data,
+        signature,
+        client_data.challenge,
+        origin,
+        rp_id,
+        &stored_pk,
+    ) catch return AuthError.InvalidSignature;
+
+    // Issue tokens
+    const tokens = try makeTokenPair(config, &account_id);
+    errdefer config.allocator.free(tokens.id_token);
+
+    const refresh_parts = crypto.parseCompoundToken(&tokens.refresh_token).?;
+
+    var rts = std.ArrayListUnmanaged(schema.Token){};
+    defer rts.deinit(config.allocator);
+    for (locked.data.value.refresh_tokens) |r| {
+        if (r.expires_at > now) try rts.append(config.allocator, r);
+    }
+
+    const rt_owned = try config.allocator.dupe(u8, &refresh_parts.token_part);
+    defer config.allocator.free(rt_owned);
+    const did_owned = try config.allocator.dupe(u8, cred.id);
+    defer config.allocator.free(did_owned);
+
+    try rts.append(config.allocator, .{
+        .token = rt_owned,
+        .device_id = did_owned,
+        .expires_at = now + refresh_token_ttl,
+    });
+
+    var new_data = locked.data.value;
+    new_data.refresh_tokens = rts.items;
+
+    try persist.writeAccountData(config.allocator, config.io, &locked, new_data);
+
+    return .{
+        .account_id = account_id,
+        .tokens = tokens,
+    };
+}
+
+pub fn rpIdFromIssuer(issuer: []const u8) []const u8 {
+    // Strip protocol prefix and port: "https://domain:443" → "domain"
+    var host = issuer;
+    if (std.mem.startsWith(u8, host, "https://")) host = host["https://".len..];
+    if (std.mem.startsWith(u8, host, "http://")) host = host["http://".len..];
+    // Strip port
+    if (std.mem.indexOfScalar(u8, host, ':')) |i| host = host[0..i];
+    return host;
+}
+
+const ClientDataChallenge = struct {
+    challenge: []const u8,
+};
+
+fn parseClientDataChallenge(client_data_json: []const u8) ?ClientDataChallenge {
+    var parsed = std.json.parseFromSlice(ClientDataChallenge, std.heap.page_allocator, client_data_json, .{
+        .ignore_unknown_fields = true,
+    }) catch return null;
+    defer parsed.deinit();
+    // Dupe the challenge string since parsed will be freed
+    return .{ .challenge = parsed.value.challenge };
+}
+
+fn findWebAuthnCredential(creds: []const schema.WebAuthnCredential, credential_id_b64: []const u8) ?schema.WebAuthnCredential {
+    for (creds) |c| {
+        if (std.mem.eql(u8, c.credential_id, credential_id_b64)) return c;
+    }
+    return null;
 }
 
 // --- Internal ---

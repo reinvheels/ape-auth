@@ -204,6 +204,108 @@ pub fn removeKeyIndex(allocator: Allocator, io: Io, base_dir: []const u8, pk_hex
     };
 }
 
+// --- Credential Index (WebAuthn) ---
+
+/// Create credentials/<credential_id_b64> containing the account_id.
+pub fn writeCredentialIndex(allocator: Allocator, io: Io, base_dir: []const u8, credential_id_b64: []const u8, account_id: *const [crypto.uuid_len]u8) !void {
+    const path = try std.fmt.allocPrint(allocator, "{s}/credentials/{s}", .{ base_dir, credential_id_b64 });
+    defer allocator.free(path);
+
+    const file = Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true }) catch |err| switch (err) {
+        error.PathAlreadyExists => return error.DeviceAlreadyExists,
+        else => return err,
+    };
+    file.writePositionalAll(io, account_id, 0) catch {
+        file.close(io);
+        Io.Dir.deleteFileAbsolute(io, path) catch {};
+        return error.WriteFailed;
+    };
+    file.close(io);
+}
+
+/// Read credentials/<credential_id_b64> to get the account_id.
+pub fn readCredentialIndex(allocator: Allocator, io: Io, base_dir: []const u8, credential_id_b64: []const u8) !?[crypto.uuid_len]u8 {
+    const path = try std.fmt.allocPrint(allocator, "{s}/credentials/{s}", .{ base_dir, credential_id_b64 });
+    defer allocator.free(path);
+
+    const file = Io.Dir.openFileAbsolute(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer file.close(io);
+
+    var buf: [crypto.uuid_len]u8 = undefined;
+    const n = try file.readPositionalAll(io, &buf, 0);
+    if (n != crypto.uuid_len) return null;
+    return buf;
+}
+
+/// Delete credentials/<credential_id_b64>.
+pub fn removeCredentialIndex(allocator: Allocator, io: Io, base_dir: []const u8, credential_id_b64: []const u8) !void {
+    const path = try std.fmt.allocPrint(allocator, "{s}/credentials/{s}", .{ base_dir, credential_id_b64 });
+    defer allocator.free(path);
+
+    Io.Dir.deleteFileAbsolute(io, path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+}
+
+// --- WebAuthn Challenge Store ---
+
+pub const WebAuthnChallengeData = struct {
+    type: []const u8, // "create" or "get"
+    expires_at: i64,
+    account_id: []const u8 = "", // pre-generated account ID for registration
+    display_name: []const u8 = "",
+};
+
+/// Store a WebAuthn challenge. Returns the challenge hex string.
+pub fn writeWebAuthnChallenge(allocator: Allocator, io: Io, base_dir: []const u8, challenge_b64: []const u8, data: WebAuthnChallengeData) !void {
+    const path = try std.fmt.allocPrint(allocator, "{s}/webauthn_challenges/{s}", .{ base_dir, challenge_b64 });
+    defer allocator.free(path);
+
+    const json = try std.json.Stringify.valueAlloc(allocator, data, .{});
+    defer allocator.free(json);
+
+    const file = Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true }) catch |err| switch (err) {
+        error.PathAlreadyExists => return error.ChallengeExists,
+        else => return err,
+    };
+    file.writePositionalAll(io, json, 0) catch {
+        file.close(io);
+        Io.Dir.deleteFileAbsolute(io, path) catch {};
+        return error.WriteFailed;
+    };
+    file.close(io);
+}
+
+/// Read and consume (delete) a WebAuthn challenge.
+pub fn consumeWebAuthnChallenge(allocator: Allocator, io: Io, base_dir: []const u8, challenge_b64: []const u8) !?std.json.Parsed(WebAuthnChallengeData) {
+    const path = try std.fmt.allocPrint(allocator, "{s}/webauthn_challenges/{s}", .{ base_dir, challenge_b64 });
+    defer allocator.free(path);
+
+    const file = Io.Dir.openFileAbsolute(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer file.close(io);
+
+    const stat = try file.stat(io);
+    const file_data = try allocator.alloc(u8, stat.size);
+    defer allocator.free(file_data);
+    const n = try file.readPositionalAll(io, file_data, 0);
+
+    const parsed = try std.json.parseFromSlice(WebAuthnChallengeData, allocator, file_data[0..n], .{
+        .allocate = .alloc_always,
+    });
+
+    // Delete after successful parse (consume)
+    Io.Dir.deleteFileAbsolute(io, path) catch {};
+
+    return parsed;
+}
+
 // --- Tests ---
 
 test "accountPath produces sharded path" {

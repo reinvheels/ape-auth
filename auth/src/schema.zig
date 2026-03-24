@@ -2,11 +2,21 @@ const std = @import("std");
 const crypto = @import("crypto.zig");
 const Allocator = std.mem.Allocator;
 
+pub const WebAuthnCredential = struct {
+    id: []const u8, // device UUID
+    credential_id: []const u8, // base64url-encoded credential ID
+    public_key: []const u8, // base64url-encoded uncompressed SEC1 point (65 bytes)
+    sign_count: u32,
+    name: []const u8,
+    created_at: i64,
+};
+
 pub const AccountData = struct {
     account: Account,
     devices: []const Device,
     refresh_tokens: []const Token,
     challenges: []const Challenge = &.{},
+    webauthn_credentials: []const WebAuthnCredential = &.{},
 };
 
 pub const Account = struct {
