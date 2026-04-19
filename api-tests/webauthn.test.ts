@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { createHash, createSign, generateKeyPairSync } from "node:crypto";
-import { BASE_URL, post, get, postForm, authHeader } from "./helpers";
+import { BASE_URL, post, get, postForm, authHeader, generateDevice } from "./helpers";
 
 console.log(`WebAuthn tests against: ${BASE_URL}`);
 
@@ -274,6 +274,67 @@ describe("WebAuthn registration", () => {
     expect(loginBody.account_id).toBe(regBody.account_id);
     expect(loginBody.id_token).toBeString();
     expect(loginBody.refresh_token).toBeString();
+  });
+});
+
+describe("passkey account with linked ed25519 device", () => {
+  test("/auth/account lists both passkey and ed25519 with kind field", async () => {
+    const rpId = getRpId();
+    const origin = BASE_URL;
+
+    // 1. Register a passkey (creates account)
+    const optionsRes = await post("/auth/webauthn/register/options", {
+      display_name: "Bitwarden John",
+    });
+    const { publicKey: regOptions } = await optionsRes.json();
+
+    const kp = generateP256KeyPair();
+    const credentialId = Buffer.from(crypto.getRandomValues(new Uint8Array(32)));
+    const coseKey = encodeCoseP256Key(Buffer.from(kp.x), Buffer.from(kp.y));
+    const attestationObject = buildAttestationObject(rpId, credentialId, coseKey);
+    const clientDataJSON = buildClientDataJSON(
+      "webauthn.create",
+      regOptions.challenge,
+      origin,
+    );
+
+    const verifyRes = await post("/auth/webauthn/register/verify", {
+      id: base64url(credentialId),
+      type: "public-key",
+      response: {
+        clientDataJSON: base64url(clientDataJSON),
+        attestationObject: base64url(attestationObject),
+      },
+    });
+    expect(verifyRes.status).toBe(200);
+    const regBody = await verifyRes.json();
+    const passkeyDeviceId = regBody.device_id;
+
+    // 2. Link an Ed25519 device to that same account
+    const cli = generateDevice();
+    const linkRes = await post(
+      "/auth/devices/link",
+      { public_key: cli.publicKeyHex, device_name: "my-cli" },
+      authHeader(regBody.access_token),
+    );
+    expect(linkRes.status).toBe(200);
+    const { device_id: cliDeviceId } = await linkRes.json();
+
+    // 3. /auth/account lists both, with correct kind
+    const accRes = await get("/auth/account", authHeader(regBody.access_token));
+    expect(accRes.status).toBe(200);
+    const account = await accRes.json();
+
+    expect(account.devices.length).toBe(2);
+    const byId = new Map(
+      account.devices.map((d: { id: string; kind: string; name: string }) => [d.id, d]),
+    );
+    const passkey = byId.get(passkeyDeviceId) as { kind: string; name: string };
+    const cliDev = byId.get(cliDeviceId) as { kind: string; name: string };
+    expect(passkey.kind).toBe("passkey");
+    expect(passkey.name).toBe("Bitwarden John");
+    expect(cliDev.kind).toBe("ed25519");
+    expect(cliDev.name).toBe("my-cli");
   });
 });
 

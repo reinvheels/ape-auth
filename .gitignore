@@ -5,3 +5,5 @@ bin/
 zig-out/
 zig-cache/
 .zig-cache/
+tmp-test/*
+!tmp-test/README.md

@@ -72,7 +72,10 @@ pub const AccountInfo = struct {
     devices: []const DeviceInfo,
 };
 
+pub const DeviceKind = enum { ed25519, passkey };
+
 pub const DeviceInfo = struct {
+    kind: DeviceKind,
     id: [crypto.uuid_len]u8,
     name: []const u8,
     created_at: i64,
@@ -446,14 +449,27 @@ pub fn getAccountInfo(config: Config, account_id: *const [crypto.uuid_len]u8) !?
         return null;
     defer parsed.deinit();
 
-    var devices = try config.allocator.alloc(DeviceInfo, parsed.value.devices.len);
+    const total = parsed.value.devices.len + parsed.value.webauthn_credentials.len;
+    var devices = try config.allocator.alloc(DeviceInfo, total);
     var count: usize = 0;
     for (parsed.value.devices) |d| {
         if (d.id.len >= crypto.uuid_len) {
             devices[count] = .{
+                .kind = .ed25519,
                 .id = d.id[0..crypto.uuid_len].*,
                 .name = try config.allocator.dupe(u8, d.name),
                 .created_at = d.created_at,
+            };
+            count += 1;
+        }
+    }
+    for (parsed.value.webauthn_credentials) |c| {
+        if (c.id.len >= crypto.uuid_len) {
+            devices[count] = .{
+                .kind = .passkey,
+                .id = c.id[0..crypto.uuid_len].*,
+                .name = try config.allocator.dupe(u8, c.name),
+                .created_at = c.created_at,
             };
             count += 1;
         }

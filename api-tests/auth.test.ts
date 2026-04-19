@@ -231,6 +231,9 @@ describe("device management", () => {
     expect(account.devices.length).toBe(2);
     const deviceIds = account.devices.map((d: { id: string }) => d.id);
     expect(deviceIds).toContain(secondaryId);
+    for (const d of account.devices) {
+      expect(d.kind).toBe("ed25519");
+    }
 
     // secondary device can log in independently
     const { loginRes } = await loginDevice(secondary);

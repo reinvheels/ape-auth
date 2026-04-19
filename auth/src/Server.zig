@@ -427,7 +427,12 @@ fn handleGetAccount(self: *Server, headers: []const u8, w: *Io.Writer) void {
 
     for (info.devices, 0..) |dev, i| {
         if (i > 0) bw.writeAll(",") catch return;
-        bw.writeAll("{\"id\":\"") catch return;
+        bw.writeAll("{\"kind\":\"") catch return;
+        bw.writeAll(switch (dev.kind) {
+            .ed25519 => "ed25519",
+            .passkey => "passkey",
+        }) catch return;
+        bw.writeAll("\",\"id\":\"") catch return;
         bw.writeAll(&dev.id) catch return;
         bw.writeAll("\",\"name\":\"") catch return;
         bw.writeAll(dev.name) catch return;

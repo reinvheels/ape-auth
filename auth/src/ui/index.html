@@ -31,6 +31,7 @@
     }
     button:hover { opacity: 0.85; }
     button:active { opacity: 0.7; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
     .btn-primary { background: #fff; color: #000; }
     .btn-secondary { background: #222; color: #ccc; border: 1px solid #333; margin-top: 0.5rem; }
     .btn-small { width: auto; padding: 0.4rem 1rem; font-size: 0.85rem; }
@@ -62,7 +63,7 @@
       phase: 'checking',
       error: '',
       accountId: '',
-      displayName: 'My Passkey',
+      displayName: '',
       accessToken: ''
     }"
     data-on:load__window="
@@ -86,13 +87,15 @@
     <!-- Auth form -->
     <div data-show="$phase === 'idle'" class="card">
       <label for="name">Passkey name</label>
-      <input id="name" type="text" data-bind:displayName placeholder="My Passkey" />
+      <input id="name" type="text" data-bind="displayName" placeholder="e.g. iPhone — Jane, Bitwarden John" />
       <button class="btn-primary"
         data-on:click="
+          const name = $displayName.trim();
+          if (name === '') return;
           $phase = 'loading';
           (async () => {
             try {
-              const r = await window.apeAuth.register($displayName);
+              const r = await window.apeAuth.register(name);
               $accountId = r.account_id;
               $accessToken = r.access_token;
               $phase = 'success';
@@ -189,7 +192,7 @@
       async register(displayName) {
         // 1. Get registration options
         const { publicKey } = await apiPost('/auth/webauthn/register/options', {
-          display_name: displayName || 'My Passkey',
+          display_name: displayName,
         });
 
         // 2. Decode challenge and user.id from base64url
