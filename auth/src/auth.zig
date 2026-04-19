@@ -20,7 +20,7 @@ fn timestamp(io: Io) i64 {
 
 const id_token_ttl: i64 = 3600; // 1 hour
 const refresh_token_ttl: i64 = 30 * 24 * 3600; // 30 days
-const challenge_ttl: i64 = 60; // 60 seconds
+const challenge_ttl: i64 = 300; // 5 minutes
 pub const AuthError = error{
     InvalidPublicKey,
     InvalidSignature,
@@ -335,6 +335,32 @@ pub fn refreshTokens(config: Config, refresh_token: []const u8) !TokenPair {
     try persist.writeAccountData(config.allocator, config.io, &locked, new_data);
 
     return tokens;
+}
+
+/// Revoke a refresh token (e.g. on logout). Succeeds silently if token not found.
+pub fn revokeRefreshToken(config: Config, refresh_token: []const u8) !void {
+    const parts = crypto.parseCompoundToken(refresh_token) orelse return;
+
+    var locked = (try persist.openAndLockAccount(config.allocator, config.io, config.base_dir, &parts.account_id)) orelse return;
+    defer locked.deinit();
+
+    var rts = std.ArrayListUnmanaged(schema.Token){};
+    defer rts.deinit(config.allocator);
+
+    var found = false;
+    for (locked.data.value.refresh_tokens) |r| {
+        if (!found and std.mem.eql(u8, r.token, &parts.token_part)) {
+            found = true;
+        } else {
+            try rts.append(config.allocator, r);
+        }
+    }
+
+    if (!found) return;
+
+    var new_data = locked.data.value;
+    new_data.refresh_tokens = rts.items;
+    try persist.writeAccountData(config.allocator, config.io, &locked, new_data);
 }
 
 /// Link a new device to an existing account.

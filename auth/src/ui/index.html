@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ape Auth</title>
+  <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0/bundles/datastar.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0a0a0a; color: #e0e0e0;
+      min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    }
+    main { width: 100%; max-width: 380px; padding: 1.5rem; }
+    h1 { font-size: 1.5rem; margin-bottom: 1.5rem; text-align: center; color: #fff; }
+    .card {
+      background: #1a1a1a; border: 1px solid #333; border-radius: 12px;
+      padding: 1.5rem; margin-bottom: 1rem;
+    }
+    label { display: block; font-size: 0.85rem; color: #999; margin-bottom: 0.25rem; }
+    input[type="text"] {
+      width: 100%; padding: 0.6rem 0.75rem; background: #111; border: 1px solid #333;
+      border-radius: 8px; color: #fff; font-size: 0.95rem; margin-bottom: 1rem;
+      outline: none; transition: border-color 0.15s;
+    }
+    input[type="text"]:focus { border-color: #666; }
+    button {
+      width: 100%; padding: 0.7rem; border: none; border-radius: 8px;
+      font-size: 0.95rem; font-weight: 500; cursor: pointer; transition: opacity 0.15s;
+    }
+    button:hover { opacity: 0.85; }
+    button:active { opacity: 0.7; }
+    .btn-primary { background: #fff; color: #000; }
+    .btn-secondary { background: #222; color: #ccc; border: 1px solid #333; margin-top: 0.5rem; }
+    .btn-small { width: auto; padding: 0.4rem 1rem; font-size: 0.85rem; }
+    .divider {
+      text-align: center; color: #555; font-size: 0.8rem; margin: 1rem 0;
+      display: flex; align-items: center; gap: 0.75rem;
+    }
+    .divider::before, .divider::after {
+      content: ""; flex: 1; height: 1px; background: #333;
+    }
+    .status { text-align: center; padding: 1rem 0; color: #999; font-size: 0.9rem; }
+    .error { color: #e55; }
+    .success { color: #5e5; }
+    .info { font-size: 0.85rem; color: #888; word-break: break-all; }
+    .info dt { color: #666; font-size: 0.75rem; text-transform: uppercase; margin-top: 0.75rem; }
+    .info dd { margin-top: 0.15rem; color: #ccc; }
+    .hidden { display: none; }
+    .spinner {
+      display: inline-block; width: 18px; height: 18px;
+      border: 2px solid #555; border-top-color: #fff; border-radius: 50%;
+      animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 0.5rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <main
+    data-signals="{
+      phase: 'checking',
+      error: '',
+      accountId: '',
+      displayName: 'My Passkey',
+      accessToken: ''
+    }"
+    data-on:load__window="
+      (async () => {
+        try {
+          const r = await fetch('/session');
+          if (r.ok) {
+            const d = await r.json();
+            $accountId = d.account_id;
+            $accessToken = d.access_token;
+            $phase = 'success';
+          } else {
+            $phase = 'idle';
+          }
+        } catch { $phase = 'idle'; }
+      })();
+    "
+  >
+    <h1>Ape Auth</h1>
+
+    <!-- Auth form -->
+    <div data-show="$phase === 'idle'" class="card">
+      <label for="name">Passkey name</label>
+      <input id="name" type="text" data-bind:displayName placeholder="My Passkey" />
+      <button class="btn-primary"
+        data-on:click="
+          $phase = 'loading';
+          (async () => {
+            try {
+              const r = await window.apeAuth.register($displayName);
+              $accountId = r.account_id;
+              $accessToken = r.access_token;
+              $phase = 'success';
+            } catch(e) {
+              $error = e.message || String(e);
+              $phase = 'error';
+            }
+          })();
+        "
+      >Create Passkey</button>
+
+      <div class="divider">or</div>
+
+      <button class="btn-secondary"
+        data-on:click="
+          $phase = 'loading';
+          (async () => {
+            try {
+              const r = await window.apeAuth.login();
+              $accountId = r.account_id;
+              $accessToken = r.access_token;
+              $phase = 'success';
+            } catch(e) {
+              $error = e.message || String(e);
+              $phase = 'error';
+            }
+          })();
+        "
+      >Sign in with Passkey</button>
+    </div>
+
+    <!-- Checking existing session -->
+    <div data-show="$phase === 'checking'" class="card">
+      <div class="status"><span class="spinner"></span> Loading&hellip;</div>
+    </div>
+
+    <!-- Loading -->
+    <div data-show="$phase === 'loading'" class="card">
+      <div class="status"><span class="spinner"></span> Waiting for passkey&hellip;</div>
+    </div>
+
+    <!-- Error -->
+    <div data-show="$phase === 'error'" class="card">
+      <div class="status error" data-text="$error"></div>
+      <button class="btn-secondary btn-small" data-on:click="$phase = 'idle'" style="margin-top:0.75rem;">
+        Try again
+      </button>
+    </div>
+
+    <!-- Authenticated -->
+    <div data-show="$phase === 'success'" class="card">
+      <div class="status success">Authenticated</div>
+      <dl class="info">
+        <dt>Account ID</dt>
+        <dd data-text="$accountId"></dd>
+        <dt>Access Token</dt>
+        <dd data-text="$accessToken.substring(0, 40) + '…'"></dd>
+      </dl>
+      <button class="btn-secondary btn-small"
+        data-on:click="
+          (async () => {
+            await fetch('/auth/logout', { method: 'POST' });
+            $accountId = ''; $accessToken = ''; $phase = 'idle';
+          })();
+        "
+        style="margin-top:1rem;"
+      >Sign out</button>
+    </div>
+  </main>
+
+  <script type="module">
+    // Base URL is the origin serving this page
+    const BASE = window.location.origin;
+
+    async function apiPost(path, body) {
+      const res = await fetch(BASE + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Request failed (${res.status})`);
+      }
+      return res.json();
+    }
+
+    function b64url(buf) {
+      return btoa(String.fromCharCode(...new Uint8Array(buf)))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    window.apeAuth = {
+      async register(displayName) {
+        // 1. Get registration options
+        const { publicKey } = await apiPost('/auth/webauthn/register/options', {
+          display_name: displayName || 'My Passkey',
+        });
+
+        // 2. Decode challenge and user.id from base64url
+        publicKey.challenge = Uint8Array.from(
+          atob(publicKey.challenge.replace(/-/g, '+').replace(/_/g, '/')),
+          c => c.charCodeAt(0),
+        );
+        publicKey.user.id = Uint8Array.from(
+          atob(publicKey.user.id.replace(/-/g, '+').replace(/_/g, '/')),
+          c => c.charCodeAt(0),
+        );
+
+        // 3. Create credential via browser API
+        const credential = await navigator.credentials.create({ publicKey });
+
+        // 4. Send attestation to server
+        return apiPost('/auth/webauthn/register/verify', {
+          id: credential.id,
+          type: credential.type,
+          response: {
+            clientDataJSON: b64url(credential.response.clientDataJSON),
+            attestationObject: b64url(credential.response.attestationObject),
+          },
+        });
+      },
+
+      async login() {
+        // 1. Get login options
+        const { publicKey } = await apiPost('/auth/webauthn/login/options', {});
+
+        // 2. Decode challenge
+        publicKey.challenge = Uint8Array.from(
+          atob(publicKey.challenge.replace(/-/g, '+').replace(/_/g, '/')),
+          c => c.charCodeAt(0),
+        );
+
+        // 3. Get assertion via browser API
+        const credential = await navigator.credentials.get({ publicKey });
+
+        // 4. Send assertion to server
+        return apiPost('/auth/webauthn/login/verify', {
+          id: credential.id,
+          type: credential.type,
+          response: {
+            clientDataJSON: b64url(credential.response.clientDataJSON),
+            authenticatorData: b64url(credential.response.authenticatorData),
+            signature: b64url(credential.response.signature),
+          },
+        });
+      },
+    };
+  </script>
+</body>
+</html>
