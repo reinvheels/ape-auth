@@ -3,6 +3,7 @@ const Io = std.Io;
 const net = Io.net;
 const crypto = @import("crypto.zig");
 const auth = @import("auth.zig");
+const rs = @import("rs/rs.zig");
 const Allocator = std.mem.Allocator;
 const Ed25519 = std.crypto.sign.Ed25519;
 
@@ -130,18 +131,22 @@ fn route(self: *Server, method: []const u8, path: []const u8, headers: []const u
         if (!hasContentType(headers, "application/json")) return sendError(w, .bad_request, "expected content-type: application/json");
         self.handleWebAuthnLoginVerify(body, w);
     }
-    // UI
+    // Example resource server (bundled for demo)
     else if (std.mem.eql(u8, path, "/")) {
         if (!is_get) return sendMethodNotAllowed(w, "GET");
-        sendHtml(w, @embedFile("ui/index.html"));
-    }
-    // Session (cookie-based)
-    else if (std.mem.eql(u8, path, "/session")) {
-        if (!is_get) return sendMethodNotAllowed(w, "GET");
-        self.handleSession(headers, w);
-    } else if (std.mem.eql(u8, path, "/auth/logout")) {
+        rs.handleIndex(w);
+    } else if (std.mem.eql(u8, path, "/rs/session")) {
+        if (is_get) {
+            rs.handleSessionGet(self.config, headers, w);
+        } else if (is_post) {
+            if (!hasContentType(headers, "application/json")) return sendError(w, .bad_request, "expected content-type: application/json");
+            rs.handleSessionCreate(self.config, body, w);
+        } else {
+            return sendMethodNotAllowed(w, "GET, POST");
+        }
+    } else if (std.mem.eql(u8, path, "/rs/logout")) {
         if (!is_post) return sendMethodNotAllowed(w, "POST");
-        self.handleLogout(headers, w);
+        rs.handleLogout(self.config, headers, w);
     }
     // Health
     else if (std.mem.eql(u8, path, "/health")) {
@@ -526,13 +531,7 @@ fn handleWebAuthnRegisterVerify(self: *Server, body: []const u8, w: *Io.Writer) 
         return;
     };
 
-    var cookie_buf: [256]u8 = undefined;
-    const cookie = buildSessionCookie(&cookie_buf, &result.tokens.refresh_token, self.config.issuer) catch {
-        sendError(w, .internal_server_error, "internal error");
-        return;
-    };
-
-    sendJsonCookie(w, .ok, resp_body, cookie);
+    sendJson(w, .ok, resp_body);
 }
 
 fn handleWebAuthnLoginOptions(self: *Server, w: *Io.Writer) void {
@@ -608,59 +607,7 @@ fn handleWebAuthnLoginVerify(self: *Server, body: []const u8, w: *Io.Writer) voi
         return;
     };
 
-    var cookie_buf: [256]u8 = undefined;
-    const cookie = buildSessionCookie(&cookie_buf, &result.tokens.refresh_token, self.config.issuer) catch {
-        sendError(w, .internal_server_error, "internal error");
-        return;
-    };
-
-    sendJsonCookie(w, .ok, resp_body, cookie);
-}
-
-// --- Session / Logout ---
-
-fn handleSession(self: *Server, headers: []const u8, w: *Io.Writer) void {
-    const cookie_val = extractCookie(headers, "ape_session") orelse {
-        sendError(w, .unauthorized, "no session");
-        return;
-    };
-
-    const tokens = auth.refreshTokens(self.config, cookie_val) catch |err| {
-        switch (err) {
-            error.TokenNotFound, error.TokenExpired => {
-                // Clear the bad cookie
-                sendJsonCookie(w, .unauthorized, "{\"error\":\"session invalid\"}", "ape_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
-            },
-            else => sendError(w, .internal_server_error, "internal error"),
-        }
-        return;
-    };
-    defer self.config.allocator.free(tokens.id_token);
-
-    const parts = crypto.parseCompoundToken(&tokens.refresh_token).?;
-
-    var body_buf: [2048]u8 = undefined;
-    const resp_body = std.fmt.bufPrint(&body_buf,
-        \\{{"account_id":"{s}","access_token":"{s}","expires_in":{d}}}
-    , .{ parts.account_id, tokens.id_token, tokens.expires_in }) catch {
-        sendError(w, .internal_server_error, "internal error");
-        return;
-    };
-
-    var cookie_buf: [256]u8 = undefined;
-    const cookie = buildSessionCookie(&cookie_buf, &tokens.refresh_token, self.config.issuer) catch {
-        sendError(w, .internal_server_error, "internal error");
-        return;
-    };
-
-    sendJsonCookie(w, .ok, resp_body, cookie);
-}
-
-fn handleLogout(self: *Server, headers: []const u8, w: *Io.Writer) void {
-    if (extractCookie(headers, "ape_session")) |cookie_val| {
-        auth.revokeRefreshToken(self.config, cookie_val) catch {};
-    }
-    sendJsonCookie(w, .ok, "{\"ok\":true}", "ape_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
+    sendJson(w, .ok, resp_body);
 }
 
 fn authenticate(self: *Server, headers: []const u8) auth.AuthError![crypto.uuid_len]u8 {
@@ -675,47 +622,6 @@ fn sendJson(w: *Io.Writer, status: std.http.Status, body: []const u8) void {
     const status_str = statusString(status);
     const response = std.fmt.bufPrint(&resp_buf, "HTTP/1.1 {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ status_str, body.len, body }) catch "";
     w.writeAll(response) catch {};
-    w.flush() catch {};
-}
-
-fn sendJsonCookie(w: *Io.Writer, status: std.http.Status, body: []const u8, cookie: []const u8) void {
-    var resp_buf: [8192]u8 = undefined;
-    const status_str = statusString(status);
-    const response = std.fmt.bufPrint(&resp_buf, "HTTP/1.1 {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nSet-Cookie: {s}\r\nConnection: close\r\n\r\n{s}", .{ status_str, body.len, cookie, body }) catch "";
-    w.writeAll(response) catch {};
-    w.flush() catch {};
-}
-
-fn buildSessionCookie(buf: []u8, refresh_token: []const u8, issuer: []const u8) ![]const u8 {
-    const secure = std.mem.startsWith(u8, issuer, "https://");
-    const secure_attr: []const u8 = if (secure) " Secure;" else "";
-    return std.fmt.bufPrint(buf, "ape_session={s}; HttpOnly;{s} SameSite=Lax; Path=/; Max-Age=2592000", .{ refresh_token, secure_attr });
-}
-
-fn extractCookie(headers: []const u8, name: []const u8) ?[]const u8 {
-    var lines = std.mem.splitSequence(u8, headers, "\r\n");
-    while (lines.next()) |line| {
-        if (asciiStartsWithIgnoreCase(line, "cookie:")) {
-            const value = std.mem.trimStart(u8, line["cookie:".len..], " ");
-            var pairs = std.mem.splitScalar(u8, value, ';');
-            while (pairs.next()) |pair_raw| {
-                const pair = std.mem.trim(u8, pair_raw, " ");
-                if (std.mem.indexOfScalar(u8, pair, '=')) |eq| {
-                    if (std.mem.eql(u8, pair[0..eq], name)) {
-                        return pair[eq + 1 ..];
-                    }
-                }
-            }
-        }
-    }
-    return null;
-}
-
-fn sendHtml(w: *Io.Writer, html: []const u8) void {
-    var header_buf: [256]u8 = undefined;
-    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{html.len}) catch return;
-    w.writeAll(header) catch {};
-    w.writeAll(html) catch {};
     w.flush() catch {};
 }
 

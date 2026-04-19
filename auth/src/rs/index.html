@@ -69,7 +69,7 @@
     data-on:load__window="
       (async () => {
         try {
-          const r = await fetch('/session');
+          const r = await fetch('/rs/session');
           if (r.ok) {
             const d = await r.json();
             $accountId = d.account_id;
@@ -157,7 +157,7 @@
       <button class="btn-secondary btn-small"
         data-on:click="
           (async () => {
-            await fetch('/auth/logout', { method: 'POST' });
+            await fetch('/rs/logout', { method: 'POST' });
             $accountId = ''; $accessToken = ''; $phase = 'idle';
           })();
         "
@@ -208,8 +208,8 @@
         // 3. Create credential via browser API
         const credential = await navigator.credentials.create({ publicKey });
 
-        // 4. Send attestation to server
-        return apiPost('/auth/webauthn/register/verify', {
+        // 4. Send attestation to IDP — receive tokens
+        const tokens = await apiPost('/auth/webauthn/register/verify', {
           id: credential.id,
           type: credential.type,
           response: {
@@ -217,6 +217,9 @@
             attestationObject: b64url(credential.response.attestationObject),
           },
         });
+
+        // 5. Trade refresh_token for HttpOnly cookie session on the RS
+        return apiPost('/rs/session', { refresh_token: tokens.refresh_token });
       },
 
       async login() {
@@ -232,8 +235,8 @@
         // 3. Get assertion via browser API
         const credential = await navigator.credentials.get({ publicKey });
 
-        // 4. Send assertion to server
-        return apiPost('/auth/webauthn/login/verify', {
+        // 4. Send assertion to IDP — receive tokens
+        const tokens = await apiPost('/auth/webauthn/login/verify', {
           id: credential.id,
           type: credential.type,
           response: {
@@ -242,6 +245,9 @@
             signature: b64url(credential.response.signature),
           },
         });
+
+        // 5. Trade refresh_token for HttpOnly cookie session on the RS
+        return apiPost('/rs/session', { refresh_token: tokens.refresh_token });
       },
     };
   </script>
